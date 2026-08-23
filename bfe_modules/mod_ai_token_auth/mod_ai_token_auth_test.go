@@ -269,14 +269,23 @@ func TestGetApiKey(t *testing.T) {
 
 func TestSetApiKey(t *testing.T) {
 	req, _ := bfe_http.NewRequest(http.MethodGet, "http://example.com/", nil)
-	SetApiKey(req, "")
+	SetApiKey(req, "", bfe_basic.AuthStyleOpenAI)
 	if req.Header.Get("Authorization") != "" {
 		t.Error("empty api key should not set header")
 	}
 
-	SetApiKey(req, "mykey")
+	SetApiKey(req, "mykey", bfe_basic.AuthStyleOpenAI)
 	if got := req.Header.Get("Authorization"); got != "Bearer mykey" {
 		t.Errorf("unexpected Authorization header: %s", got)
+	}
+
+	req2, _ := bfe_http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	SetApiKey(req2, "mykey", bfe_basic.AuthStyleAnthropic)
+	if got := req2.Header.Get("x-api-key"); got != "mykey" {
+		t.Errorf("unexpected x-api-key header: %s", got)
+	}
+	if req2.Header.Get("Authorization") != "" {
+		t.Error("anthropic style should not set Authorization header")
 	}
 }
 

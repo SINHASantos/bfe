@@ -1,0 +1,15 @@
+{
+    "Version": "20260720150000",
+    "Hosts": {
+        "ai_product": [
+            "openai.example.org",
+            "anthropic.example.org",
+            "both.example.org"
+        ]
+    },
+    "HostTags": {
+        "ai_product": [
+            "ai_product"
+        ]
+    }
+}

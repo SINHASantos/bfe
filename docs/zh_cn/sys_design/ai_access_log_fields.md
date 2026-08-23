@@ -19,7 +19,7 @@ BFE 作为 AI 网关，需要把请求在认证、路由、转发、计费等各
 
 ## 2. 字段总览
 
-AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前已定义 26 个字段：
+AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前已定义 27 个字段：
 
 | 编号 | 字段名 | 类型 | 说明 | 采集模块 |
 |------|--------|------|------|----------|
@@ -39,6 +39,7 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前
 | 714 | `ai_provider` | `string` | 上游模型提供商标识 | `bfe_server/reverseproxy.go` |
 | 715 | `ai_retry_count` | `uint32` | 模型调用层 key-level 重试次数 | `bfe_server/reverseproxy.go` |
 | 716 | `ai_mode` | `string` | AI 请求模式，如 `chat`、`image_generation` | `bfe_server/http_conn.go` |
+| 717 | `ai_protocol` | `string` | AI 协议/认证风格，如 `openai`、`anthropic` | `bfe_basic.GetApiKey` / `bfe_server/reverseproxy.go` |
 | 761 | `ai_cost_value` | `int64` | 估算成本（定点整数，精度由币种决定） | `mod_ai_token_auth` |
 | 762 | `ai_cost_currency` | `string` | 成本币种，如 `RMB` / `USD` | `bfe_server/reverseproxy.go` |
 | 781 | `ai_cache_read_tokens` | `int64` | 从 cache 读取的 Token 数（已包含在 `ai_input_tokens` 中） | `mod_ai_token_auth` / `mod_body_process` |
@@ -55,7 +56,7 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前
 | 编号区间 | 用途 |
 |----------|------|
 | 701 - 713 | 已投入使用字段，保持现状，不再调整 |
-| 714 - 760 | 模型与请求基础信息（model、provider、stream、retry、cache 等） |
+| 714 - 760 | 模型与请求基础信息（model、provider、protocol、stream、retry、cache 等） |
 | 761 - 800 | Token 与成本计量（761-780 为普通 token/cost；781-790 为 cache/audio/image 子项） |
 | 801 - 840 | 路由、转换与插件 |
 | 841 - 880 | 安全、合规与隐私 |
@@ -76,6 +77,7 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前
 │  bfe_server/http_conn.go                                    │
 │  - 初始化 AiBasicInfo                                       │
 │  - 提取 ai_apikey_id（原始 key，后续会被 key_id 覆盖）       │
+│  - 根据 Authorization / x-api-key / 路径识别 AuthStyle       │
 │  - 提取 ai_requested_model                                   │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
@@ -90,8 +92,10 @@ AI 可观测字段统一占用 `bfe-access-pb` 的 701-900 编号区间，当前
 ┌─────────────────────────────────────────────────────────────┐
 │  bfe_server/reverseproxy.go                                  │
 │  - ServeHTTPForAI / aiClusterInvoke / doSingleAIForward      │
-│  - 设置 ai_provider、ai_retry_count、                        │
+│  - 检测/兜底 AuthStyle，校验 cluster.AIConf.ModelProtocols   │
+│  - 设置 ai_provider、ai_retry_count、ai_protocol、           │
 │  │   ai_cluster_key_names、ai_target_model                   │
+│  - 按 AuthStyle 注入 API Key 与 anthropic-version            │
 │  - 触发 cluster-level fallback                               │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
@@ -125,6 +129,7 @@ type AiBasicInfo struct {
     TargetModel     string            // 704 ai_target_model
     Mode            string            // 716 ai_mode
     Provider        string            // 714 ai_provider
+    AuthStyle       string            // 717 ai_protocol (openai / anthropic / unknown)
     RetryCount      uint32            // 715 ai_retry_count
     CostCurrency    string            // 762 ai_cost_currency
     tokenUsage      TokenUsage
@@ -220,9 +225,13 @@ message AIRouteRuleHit {
 
 在 `doSingleAIForward()` 中：
 
+- 若 `AiBasicInfo.AuthStyle` 尚未识别，调用 `bfe_basic.DetectAuthStyle()` 兜底识别；
+- 比较请求 `AuthStyle` 与 `cluster.AIConf.ModelProtocols`，不匹配时返回 400；
 - 从 `cluster.AIConf.Provider` 写入 `AiBasicInfo.Provider`；
 - 从 `cluster.AIConf.ModelTable.Currency` 写入 `AiBasicInfo.CostCurrency`；
 - 调用 `AiBasicInfo.AppendClusterKeyName(cluster.Name, selectedKey.Name)` 记录尝试；
+- 按 `AuthStyle` 调用 `mod_ai_token_auth.SetApiKey()` 注入 `Authorization: Bearer` 或 `x-api-key`；
+- Anthropic 风格下自动补 `anthropic-version: 2023-06-01`；
 - 在 `ModelMapping`、路由 target/fallback model override、provider prefix strip 后更新 `TargetModel`。
 
 在 `aiClusterInvoke()` 的 key-level retry 循环中：
@@ -240,7 +249,7 @@ message AIRouteRuleHit {
 `reqAiInfoGen()` 负责把上述所有字段从 `AiBasicInfo`、`AiRateLimitHitInfo`、`AiRouteResult` 映射到 `RequestLog`：
 
 - 字段重命名：`AiApikey`→`AiApikeyId`、`AiMappedModel`→`AiTargetModel`、`AiPromptTokens`→`AiInputTokens`；
-- 新增字段：`AiMode`、`AiProvider`、`AiRetryCount`、`AiCostValue`、`AiCostCurrency`、`AiCacheReadTokens`、`AiCacheWriteTokens`、`AiAudioInputTokens`、`AiAudioOutputTokens`、`AiImageCount`、`AiRouteRuleHits`、`AiClusterKeyNames`、`AiAuthHitQuotaPlans`。
+- 新增字段：`AiMode`、`AiProtocol`、`AiProvider`、`AiRetryCount`、`AiCostValue`、`AiCostCurrency`、`AiCacheReadTokens`、`AiCacheWriteTokens`、`AiAudioInputTokens`、`AiAudioOutputTokens`、`AiImageCount`、`AiRouteRuleHits`、`AiClusterKeyNames`、`AiAuthHitQuotaPlans`。
 
 ---
 
@@ -255,7 +264,7 @@ message AIRouteRuleHit {
 ## 7. 测试与验证
 
 1. **单元测试**：`bfe_modules/mod_access_pb3/request_log_test.go` 覆盖所有字段的赋值逻辑；
-2. **集成测试**：`tests/integration/implementation/scenario-SC05-access-log-ai-fields/` 启动真实 BFE 进程，发送 AI 请求后解码 b2log，校验全部 26 个字段（包括 `ai_mode`、`ai_image_count` 等图像生成场景字段）。
+2. **集成测试**：`tests/integration/implementation/scenario-SC05-access-log-ai-fields/` 启动真实 BFE 进程，发送 AI 请求后解码 b2log，校验全部 27 个字段（包括 `ai_mode`、`ai_protocol`、`ai_image_count` 等图像生成场景字段）。
 
 ---
 
@@ -263,7 +272,9 @@ message AIRouteRuleHit {
 
 - `bfe-access-pb/docs/protobuf.md`
 - `bfe-access-pb/RELEASE_NOTES_v0.3.3.md`
+- `bfe-access-pb/RELEASE_NOTES_v0.3.4.md`
 - `bfe/docs/zh_cn/modifications/2026-08-19-update-ai-access-log-fields/design-changes.md`
 - `bfe/docs/zh_cn/modifications/2026-08-22-audio-token-billing-support/design-changes.md`
 - `bfe/docs/zh_cn/modifications/2026-08-22-image-generation-billing-support/design-changes.md`
+- `bfe/docs/zh_cn/modifications/2026-08-20-claude-protocol-support/design-changes.md`
 - `bfe/tests/integration/测试设计文档/scenario-SC05-AI访问日志字段校验/场景说明.md`

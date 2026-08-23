@@ -98,6 +98,7 @@ cluster_conf.data为集群转发配置文件。
 | AIConf.ModelMapping                 | Map[string]string | 原请求model -> 后端服务的model 的映射关系      | N    | 访问后端服务时将根据请求的 model 字段查找此映射关系，命中则重写请求的 model 字段 | 键值均非空                                                   |
 | AIConf.MatchPrefix                  | String            | 需要匹配的 provider/model 前缀                 | N    | 例如 `openrouter/`；必须以 `/` 结尾；用于 OpenRouter 等聚合 provider 场景 | `StripPrefix=true` 时必填                                    |
 | AIConf.StripPrefix                  | Boolean           | 是否裁剪 `MatchPrefix` 指定前缀                | N    | `true` 时转发给下游前会从请求 model 字段中去掉该前缀；`false` 时仅用于路由标识，不裁剪 | 默认 `false`                                                 |
+| AIConf.ModelProtocols               | []String          | 该集群 provider 支持的模型访问协议列表         | N    | 例如 `["openai"]`、`["anthropic"]`、`["openai", "anthropic"]`；为空时默认仅支持 `openai` | 元素取值须为 `openai` 或 `anthropic`                         |
 | AIConf.ModelTable                   | Object            | 该集群的模型定价表                             | N    | 由 ai-gateway-api 根据 `Provider` 查询 model_prices 自动填充；当前货币固定为 RMB | 元素见下表「AIConf.ModelTable 元素」                         |
 
 ##### AIConf.Keys 元素
@@ -300,6 +301,7 @@ cluster_conf.data为集群转发配置文件。
                 "Provider": "deepseek",
                 "MatchPrefix": "openrouter/",
                 "StripPrefix": true,
+                "ModelProtocols": ["openai"],
                 "Keys": [
                     {
                         "Name": "key-primary",
@@ -342,6 +344,83 @@ cluster_conf.data为集群转发配置文件。
                             }
                         }
                     ]
+                }
+            },
+            "ai_cluster_anthropic_example": {
+                "BackendConf": {
+                    "Protocol": "https",
+                    "TimeoutConnSrv": 2000,
+                    "TimeoutResponseHeader": 50000,
+                    "MaxIdleConnsPerHost": 0,
+                    "RetryLevel": 0
+                },
+                "CheckConf": {
+                    "Schem": "https",
+                    "Uri": "/healthcheck",
+                    "Host": "example.org",
+                    "StatusCode": 200,
+                    "FailNum": 10,
+                    "CheckInterval": 1000
+                },
+                "GslbBasic": {
+                    "CrossRetry": 0,
+                    "RetryMax": 2,
+                    "HashConf": {
+                        "HashStrategy": 0,
+                        "HashHeader": "Cookie:UID",
+                        "SessionSticky": false
+                    }
+                },
+                "ClusterBasic": {
+                    "TimeoutReadClient": 30000,
+                    "TimeoutWriteClient": 60000,
+                    "TimeoutReadClientAgain": 60000,
+                    "ReqWriteBufferSize": 512,
+                    "ReqFlushInterval": 0,
+                    "ResFlushInterval": -1,
+                    "CancelOnClientClose": false
+                },
+                "AIConf": {
+                    "Type": 0,
+                    "Provider": "my-anthropic",
+                    "ModelProtocols": ["anthropic"],
+                    "Keys": [
+                        {
+                            "Name": "key-primary",
+                            "Key": "sk-ant-api03-example",
+                            "Weight": 100
+                        }
+                    ],
+                    "KeyPolicy": {
+                        "Strategy": "weighted_random",
+                        "MaxRetries": 3,
+                        "RetryBackoffInitial": 500,
+                        "RetryBackoffMax": 5000
+                    },
+                    "ModelTable": {
+                        "Currency": "RMB",
+                        "Models": [
+                            {
+                                "Provider": "my-anthropic",
+                                "Model": "claude-3-5-sonnet",
+                                "BaseModel": "claude-3-5-sonnet",
+                                "Mode": "chat",
+                                "Capabilities": ["chat", "tools"],
+                                "SupportedParameters": ["temperature", "max_tokens"],
+                                "Limits": {
+                                    "context_window": 200000,
+                                    "max_input_tokens": 200000,
+                                    "max_output_tokens": 8192
+                                },
+                                "Prices": {
+                                    "input_cost_per_token": 0.000003,
+                                    "output_cost_per_token": 0.000015,
+                                    "cache_read_input_token_cost": 0.000000375,
+                                    "cache_creation_input_token_cost": 0.00000375
+                                }
+                            }
+                        ]
+                    }
                 }
             }
         }

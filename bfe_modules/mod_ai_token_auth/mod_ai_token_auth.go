@@ -17,7 +17,6 @@ package mod_ai_token_auth
 import (
 	"fmt"
 	"net/url"
-	"strings"
 
 	"github.com/bfenetworks/go-lib/log"
 	"github.com/bfenetworks/go-lib/quota"
@@ -126,6 +125,21 @@ func UpdateCtxByUsage(ctx *TokenAuthContext, data []byte) {
 		imageCount = gjson.GetBytes(data, "data.#").Int()
 	}
 
+	// Claude fallback: input_tokens / output_tokens / cache_read_input_tokens / cache_creation_input_tokens
+	if prompt == 0 && completion == 0 {
+		prompt = gjson.GetBytes(data, "usage.input_tokens").Int()
+		completion = gjson.GetBytes(data, "usage.output_tokens").Int()
+		if cacheRead == 0 {
+			cacheRead = gjson.GetBytes(data, "usage.cache_read_input_tokens").Int()
+		}
+		if cacheWrite == 0 {
+			cacheWrite = gjson.GetBytes(data, "usage.cache_creation_input_tokens").Int()
+		}
+		if used == 0 {
+			used = prompt + completion
+		}
+	}
+
 	tokenUsage := ctx.aiBasicInfo.GetTokenUsage()
 	if used > 0 {
 		tokenUsage.UsedQuota = used
@@ -230,26 +244,22 @@ func (m *ModuleAITokenAuth) tokenRequestFinishHandler(req *bfe_basic.Request, re
 	return bfe_module.BfeHandlerGoOn
 }
 
-func SetApiKey(req *bfe_http.Request, apiKey string) {
-	// set api key to Authorization header
+func SetApiKey(req *bfe_http.Request, apiKey string, authStyle string) {
+	// set api key according to protocol/auth style
 	if apiKey == "" {
 		return
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+
+	switch authStyle {
+	case bfe_basic.AuthStyleAnthropic:
+		req.Header.Set("x-api-key", apiKey)
+	default:
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	}
 }
 
 func GetApiKey(req *bfe_basic.Request) string {
-	// get api key from Authorization header
-	authHeader := req.HttpRequest.Header.Get("Authorization")
-	if authHeader == "" {
-		return ""
-	}
-
-	// remove "Bearer " prefix if exists
-	authHeader = strings.TrimPrefix(authHeader, "Bearer ")
-	authHeader = strings.TrimPrefix(authHeader, "sk-")
-
-	return authHeader
+	return bfe_basic.GetApiKey(req)
 }
 
 // found product handler

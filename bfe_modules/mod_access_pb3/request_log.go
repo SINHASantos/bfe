@@ -405,6 +405,11 @@ func reqAiInfoGen(reqLog *bfe_access_pb3.RequestLog, req *bfe_basic.Request, res
 		reqLog.AiProvider = proto.String(aiInfo.Provider)
 	}
 
+	// Protocol/auth style
+	if aiInfo.AuthStyle != "" {
+		reqLog.AiProtocol = proto.String(aiInfo.AuthStyle)
+	}
+
 	// Stream
 	reqLog.AiStream = proto.Bool(isStreamResponse(req, res))
 

@@ -90,12 +90,13 @@ type ModelTable struct {
 }
 
 type AIConf struct {
-    Type         int                // 保留字段，当前应为 0
-    ModelMapping *map[string]string // 模型映射
-    Provider     string             // provider 名
-    Keys         []AIKey            // 多 Key 模式
-    KeyPolicy    *AIKeyPolicy       // Key 选择策略
-    ModelTable   *ModelTable        // 成本定价表
+    Type           int                // 保留字段，当前应为 0
+    ModelMapping   *map[string]string // 模型映射
+    Provider       string             // provider 名
+    Keys           []AIKey            // 多 Key 模式
+    KeyPolicy      *AIKeyPolicy       // Key 选择策略
+    ModelTable     *ModelTable        // 成本定价表
+    ModelProtocols []string           // provider 支持的协议：openai / anthropic；为空默认仅 openai
 }
 ```
 

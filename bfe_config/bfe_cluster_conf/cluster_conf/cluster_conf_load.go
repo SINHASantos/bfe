@@ -178,6 +178,11 @@ type AIConf struct {
 	// StripPrefix controls whether to strip MatchPrefix from the request model
 	// field before forwarding to the backend.
 	StripPrefix bool `json:"StripPrefix"`
+
+	// ModelProtocols lists the model access protocols supported by the cluster's provider.
+	// It comes from ai-gateway-api provider.model_protocols, e.g. ["openai"], ["anthropic"],
+	// ["openai", "anthropic"]. Empty defaults to ["openai"] for backward compatibility.
+	ModelProtocols []string
 }
 
 const (
