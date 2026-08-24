@@ -29,12 +29,14 @@
 | RateLimitPolicies{v}.rules.tpm[].max_tokens      | Integer | 窗口内最大 Token 数                     | Y    | -        | 正整数 |
 | RateLimitPolicies{v}.rules.tpm[].step_minutes    | Integer | 步长                                    | Y    | 单位：分钟 | 正整数 |
 | RateLimitPolicies{v}.rules.tpm[].models          | Array   | 该规则适用的模型列表                    | N    | 未指定时适用于所有模型 | 字符串数组 |
+| RateLimitPolicies{v}.rules.tpm[].redis_key       | String  | 稳定的 Redis 计数器 key                 | N    | 由控制面按 `(policy_id, rule_index)` 生成；未指定时 BFE 按原 `name` 逻辑兜底 | 非空字符串 |
 | RateLimitPolicies{v}.rules.rpm                   | Array   | RPM（每分钟请求数）限流规则列表         | N    | -        | 元素为 Object |
 | RateLimitPolicies{v}.rules.rpm[].name            | String  | 规则名称                                | Y    | -        | 非空字符串 |
 | RateLimitPolicies{v}.rules.rpm[].window_minutes  | Integer | 时间窗口                                | Y    | 单位：分钟 | 正整数 |
 | RateLimitPolicies{v}.rules.rpm[].max_requests    | Integer | 窗口内最大请求数                        | Y    | -        | 正整数 |
 | RateLimitPolicies{v}.rules.rpm[].burst           | Integer | 突发请求数                              | Y    | -        | 非负整数 |
 | RateLimitPolicies{v}.rules.rpm[].models          | Array   | 该规则适用的模型列表                    | N    | 未指定时适用于所有模型 | 字符串数组 |
+| RateLimitPolicies{v}.rules.rpm[].redis_key       | String  | 稳定的 Redis 计数器 key                 | N    | 由控制面按 `(policy_id, rule_index)` 生成；未指定时 BFE 按原 `name` 逻辑兜底 | 非空字符串 |
 | RateLimitPolicies{v}.rules.max_concurrency       | Integer | 最大并发数                              | N    | -        | 非负整数 |
 | ApikeyRateLimitPolicyBindings                    | Object  | apikey 到策略 ID 列表的绑定关系         | N    | -        | 键值对对象 |
 | ApikeyRateLimitPolicyBindings{k}                 | String  | apikey                                  | Y    | 作为绑定关系的键 | 非空字符串 |
@@ -61,12 +63,12 @@
             "enabled": true,
             "rules": {
                 "tpm": [
-                    {"name":"abc0", "window_minutes": 1, "max_tokens": 10000, "step_minutes": 1, "models": ["gpt-4", "gpt-4o"]},
-                    {"name":"abc1", "window_minutes": 10, "max_tokens": 50000, "step_minutes": 1, "models": ["gpt-3.5"]},
-                    {"name":"abc2", "window_minutes": 60, "max_tokens": 200000, "step_minutes": 5}
+                    {"name":"abc0", "window_minutes": 1, "max_tokens": 10000, "step_minutes": 1, "models": ["gpt-4", "gpt-4o"], "redis_key": "RL_TPM_rlp-0001_0"},
+                    {"name":"abc1", "window_minutes": 10, "max_tokens": 50000, "step_minutes": 1, "models": ["gpt-3.5"], "redis_key": "RL_TPM_rlp-0001_1"},
+                    {"name":"abc2", "window_minutes": 60, "max_tokens": 200000, "step_minutes": 5, "redis_key": "RL_TPM_rlp-0001_2"}
                 ],
                 "rpm": [
-                    {"name":"abc0", "window_minutes": 1, "max_requests": 100, "burst":1, "models": ["gpt-4"]}
+                    {"name":"abc0", "window_minutes": 1, "max_requests": 100, "burst":1, "models": ["gpt-4"], "redis_key": "RL_RPM_rlp-0001_0"}
                 ],
                 "max_concurrency": 50
             }

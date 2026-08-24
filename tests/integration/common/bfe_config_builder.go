@@ -34,6 +34,46 @@ type TokenRuleData struct {
 	Config     map[string][]TokenRule
 }
 
+// RateLimitRule is the JSON representation of a TPM/RPM rule in ai_rate_limit.data.
+type RateLimitRule struct {
+	Name          string   `json:"name"`
+	WindowMinutes int      `json:"window_minutes"`
+	MaxTokens     int64    `json:"max_tokens,omitempty"`
+	MaxRequests   int64    `json:"max_requests,omitempty"`
+	StepMinutes   int      `json:"step_minutes,omitempty"`
+	Burst         int64    `json:"burst,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	RedisKey      string   `json:"redis_key,omitempty"`
+}
+
+// RateLimitPolicy is the JSON representation of a rate limit policy in ai_rate_limit.data.
+type RateLimitPolicy struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+	Rules   struct {
+		TPM            []RateLimitRule `json:"tpm,omitempty"`
+		RPM            []RateLimitRule `json:"rpm,omitempty"`
+		MaxConcurrency *int64          `json:"max_concurrency,omitempty"`
+	} `json:"rules"`
+}
+
+// RateLimitProductRule is the JSON representation of a product rule in ai_rate_limit.data.
+type RateLimitProductRule struct {
+	Cond      string `json:"cond"`
+	HitAction struct {
+		Cmd    string   `json:"cmd"`
+		Params []string `json:"params,omitempty"`
+	} `json:"hit_action"`
+}
+
+// RateLimitPolicyData holds the content of mod_ai_rate_limit/ai_rate_limit.data.
+type RateLimitPolicyData struct {
+	Version                       string                         `json:"Version"`
+	Config                        map[string][]RateLimitProductRule `json:"Config"`
+	RateLimitPolicies             map[string]RateLimitPolicy     `json:"RateLimitPolicies"`
+	ApikeyRateLimitPolicyBindings map[string][]string            `json:"ApikeyRateLimitPolicyBindings"`
+}
+
 // QuotaPlan is the JSON representation of a quota plan.
 type QuotaPlan struct {
 	Id          string
@@ -88,6 +128,8 @@ type BFEConfigBuilder struct {
 	RedisAddr string
 	// TokenRuleData optionally generates mod_ai_token_auth/token_rule.data.
 	TokenRuleData *TokenRuleData
+	// RateLimitPolicyData optionally generates mod_ai_rate_limit/ai_rate_limit.data.
+	RateLimitPolicyData *RateLimitPolicyData
 }
 
 // Build prepares the BFE configuration directory.
@@ -142,6 +184,12 @@ func (b *BFEConfigBuilder) Build() error {
 		}
 	}
 
+	if b.RateLimitPolicyData != nil {
+		if err := b.writeRateLimitPolicyData(); err != nil {
+			return fmt.Errorf("write ai_rate_limit.data failed: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -153,9 +201,12 @@ func (b *BFEConfigBuilder) setupRedisBns() error {
 		return fmt.Errorf("parse redis addr %s failed: %w", b.RedisAddr, err)
 	}
 
-	// rewrite mod_ai_token_auth.conf to use the fixed bns name
-	if err := b.rewriteModAITokenAuthBns(); err != nil {
+	// rewrite mod_ai_token_auth.conf and mod_ai_rate_limit.conf to use the fixed bns name
+	if err := b.rewriteModBns("mod_ai_token_auth"); err != nil {
 		return fmt.Errorf("rewrite mod_ai_token_auth bns failed: %w", err)
+	}
+	if err := b.rewriteModBns("mod_ai_rate_limit"); err != nil {
+		return fmt.Errorf("rewrite mod_ai_rate_limit bns failed: %w", err)
 	}
 
 	// generate name_conf.data mapping bns name to redis addr
@@ -176,8 +227,8 @@ func (b *BFEConfigBuilder) setupRedisBns() error {
 	return b.rewriteBFEConfNameConf()
 }
 
-func (b *BFEConfigBuilder) rewriteModAITokenAuthBns() error {
-	path := filepath.Join(b.TargetConfDir, "mod_ai_token_auth", "mod_ai_token_auth.conf")
+func (b *BFEConfigBuilder) rewriteModBns(modName string) error {
+	path := filepath.Join(b.TargetConfDir, modName, modName+".conf")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -239,6 +290,11 @@ func splitHostPort(addr string) (string, int, error) {
 func (b *BFEConfigBuilder) writeTokenRuleData() error {
 	path := filepath.Join(b.TargetConfDir, "mod_ai_token_auth", "token_rule.data")
 	return writeJSONFile(path, b.TokenRuleData)
+}
+
+func (b *BFEConfigBuilder) writeRateLimitPolicyData() error {
+	path := filepath.Join(b.TargetConfDir, "mod_ai_rate_limit", "ai_rate_limit.data")
+	return writeJSONFile(path, b.RateLimitPolicyData)
 }
 
 func (b *BFEConfigBuilder) normalizeAIRouteData() error {

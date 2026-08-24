@@ -1,0 +1,28 @@
+{
+    "Version": "20260720150000",
+    "route_rules": {
+        "apikey_ak_ratelimit": {
+            "type": "apikey",
+            "owner": "ak_ratelimit",
+            "rules": [
+                {
+                    "name": "ratelimit-default",
+                    "Cond": "default_t()",
+                    "targets": [
+                        {
+                            "ClusterName": "cluster_ratelimit",
+                            "Model": "",
+                            "Weight": 100
+                        }
+                    ],
+                    "fallbacks": []
+                }
+            ]
+        }
+    },
+    "ApikeyRouteTableBindings": {
+        "ak_ratelimit": [
+            "apikey_ak_ratelimit"
+        ]
+    }
+}
