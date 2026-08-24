@@ -558,6 +558,22 @@ func (c *RedisClient) IncrBy(key string, delta int64) (int64, error) {
 	return count, nil
 }
 
+// delete key from redis
+func (c *RedisClient) Delete(key string) error {
+	// get connection from pool
+	conn := c.getConnByKey(key)
+	defer conn.Close()
+
+	procStart := time.Now()
+	_, err := conn.Do("DEL", key)
+	if err != nil {
+		return err
+	}
+
+	c.setDelayState(c.delay, procStart)
+	return nil
+}
+
 // incr and expire key to redis
 func (c *RedisClient) IncrAndExpire(key string, expire int) (int64, error) {
 	c.incrModuleState2(RedisIncr)

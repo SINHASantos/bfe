@@ -36,6 +36,7 @@ type Client interface {
 	PIncr([]string) ([]int64, error)
 	GetInt64(key string) (int64, error)
 	IncrBy(key string, delta int64) (int64, error)
+	Delete(key string) error
 	NewScript(src string) RedisScript
 }
 
