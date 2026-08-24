@@ -31,11 +31,39 @@ const (
 	COMPLETION_TOKENS_UNKNOWN = -1
 )
 
+// AI request modes, inferred from request path.
+const (
+	ModeChat               = "chat"
+	ModeCompletion         = "completion"
+	ModeImageGeneration    = "image_generation"
+	ModeImageEdit          = "image_edit"
+	ModeEmbedding          = "embedding"
+	ModeAudioSpeech        = "audio_speech"
+	ModeAudioTranscription = "audio_transcription"
+	ModeRerank             = "rerank"
+	ModeVideoGeneration    = "video_generation"
+	ModeOcr                = "ocr"
+	ModeSearch             = "search"
+	ModeRealtime           = "realtime"
+)
+
+// AI protocol/auth styles.
+const (
+	AuthStyleOpenAI    = "openai"
+	AuthStyleAnthropic = "anthropic"
+	AuthStyleUnknown   = "unknown"
+)
+
 type TokenUsage struct {
-	PromptTokens     int64 // number of tokens in the prompt
-	CompletionTokens int64 // number of tokens in the completion
-	UsedQuota        int64 // used quota for this request (unit=total_token)
-	UsedCost         int64 // used RMB cost for this request, 1 unit = 1e-8 yuan (unit=RMB)
+	PromptTokens      int64 // number of tokens in the prompt (includes cache_read_tokens, audio_input_tokens)
+	CompletionTokens  int64 // number of tokens in the completion (includes audio_output_tokens)
+	CacheReadTokens   int64 // usage.cache_read_tokens, already included in PromptTokens
+	CacheWriteTokens  int64 // usage.cache_write_tokens, independent add-on item
+	AudioInputTokens  int64 // usage.audio_input_tokens, already included in PromptTokens
+	AudioOutputTokens int64 // usage.audio_output_tokens, already included in CompletionTokens
+	ImageCount        int64 // number of generated images for image generation models
+	UsedQuota         int64 // used quota for this request (unit=total_token)
+	UsedCost          int64 // used RMB cost for this request, 1 unit = 1e-8 yuan (unit=RMB)
 }
 
 type TokenTimeInfo struct {
@@ -63,9 +91,11 @@ type AiBasicInfo struct {
 	ClientKeyId     string
 	ClientModel     string
 	TargetModel     string
-	Provider        string          // upstream model provider, e.g. openai, deepseek
-	RetryCount      uint32          // model invocation retry count (key-level retry)
-	CostCurrency    string          // cost currency, e.g. RMB, USD
+	Mode            string // request mode, e.g. chat, image_generation
+	Provider        string // upstream model provider, e.g. openai, deepseek
+	AuthStyle       string // request protocol/auth style, e.g. openai, anthropic
+	RetryCount      uint32 // model invocation retry count (key-level retry)
+	CostCurrency    string // cost currency, e.g. RMB, USD
 	tokenUsage      TokenUsage
 	ApikeyTags      []ApikeyTag
 	TokenTimeInfo   TokenTimeInfo
@@ -94,17 +124,73 @@ func (aiinfo *AiBasicInfo) IsAllowEstimateToken() bool {
 }
 
 func GetApiKey(req *Request) string {
-	// get api key from Authorization header
+	// 1. prefer Authorization: Bearer <key> for OpenAI style
 	authHeader := req.HttpRequest.Header.Get("Authorization")
-	if authHeader == "" {
-		return ""
+	if authHeader != "" {
+		// remove "Bearer " prefix if exists
+		authHeader = strings.TrimPrefix(authHeader, "Bearer ")
+		authHeader = strings.TrimPrefix(authHeader, "sk-")
+		if ai := req.GetAiBasicInfo(); ai != nil {
+			ai.AuthStyle = AuthStyleOpenAI
+		}
+		return authHeader
 	}
 
-	// remove "Bearer " prefix if exists
-	authHeader = strings.TrimPrefix(authHeader, "Bearer ")
-	authHeader = strings.TrimPrefix(authHeader, "sk-")
+	// 2. fallback to x-api-key for Anthropic style
+	if xApiKey := req.HttpRequest.Header.Get("x-api-key"); xApiKey != "" {
+		if ai := req.GetAiBasicInfo(); ai != nil {
+			ai.AuthStyle = AuthStyleAnthropic
+		}
+		return xApiKey
+	}
 
-	return authHeader
+	return ""
+}
+
+// DetectAuthStyle infers the AI protocol/auth style from request characteristics.
+// It is purely based on request path/headers and does not rely on user routing rules.
+func DetectAuthStyle(req *Request) string {
+	if req == nil || req.HttpRequest == nil {
+		return AuthStyleUnknown
+	}
+
+	path := req.HttpRequest.URL.Path
+	if strings.HasPrefix(path, "/v1/messages") {
+		return AuthStyleAnthropic
+	}
+
+	// x-api-key without Authorization indicates Anthropic style
+	if req.HttpRequest.Header.Get("x-api-key") != "" &&
+		req.HttpRequest.Header.Get("Authorization") == "" {
+		return AuthStyleAnthropic
+	}
+
+	return AuthStyleOpenAI
+}
+
+// DetectModeFromPath infers the AI request mode from the request path.
+// It defaults to ModeChat for unknown paths to keep backward compatibility.
+func DetectModeFromPath(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/v1/images/generations"):
+		return ModeImageGeneration
+	case strings.HasPrefix(path, "/v1/images/edits"):
+		return ModeImageEdit
+	case strings.HasPrefix(path, "/v1/chat/completions"):
+		return ModeChat
+	case strings.HasPrefix(path, "/v1/completions"):
+		return ModeCompletion
+	case strings.HasPrefix(path, "/v1/embeddings"):
+		return ModeEmbedding
+	case strings.HasPrefix(path, "/v1/audio/speech"):
+		return ModeAudioSpeech
+	case strings.HasPrefix(path, "/v1/audio/transcriptions"):
+		return ModeAudioTranscription
+	case strings.HasPrefix(path, "/v1/rerank"):
+		return ModeRerank
+	default:
+		return ModeChat
+	}
 }
 
 // Set user context by key and val.
@@ -217,6 +303,8 @@ const (
 	CodeModelInternalError    = "MODEL_INTERNAL_ERROR"
 	CodeBackendTimeout        = "BACKEND_TIMEOUT"
 
+	CodeProviderProtocolMismatch = "PROVIDER_PROTOCOL_MISMATCH"
+
 	CodeConfigLoadError    = "CONFIG_LOAD_ERROR"
 	CodeBackendUnavailable = "BACKEND_UNAVAILABLE"
 	CodeInvalidRequestBody = "INVALID_REQUEST_BODY"
@@ -275,6 +363,8 @@ var ErrorCodeToStatusCode = map[string]int{
 	CodeCostBudgetExhausted:    429,
 	CodeGeoRestricted:          403,
 	CodeTimeWindowRestricted:   403,
+
+	CodeProviderProtocolMismatch: 400,
 }
 
 const (

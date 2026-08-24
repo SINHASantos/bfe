@@ -67,6 +67,7 @@ type AIConf struct {
     Keys               []AIKey      // multiple API keys; empty means no key injection
     KeyPolicy          *AIKeyPolicy // key selection & retry policy
     ModelTable         *ModelTable  // pricing table, auto-filled by InnerAPI
+    ModelProtocols     []string     // supported protocols: openai / anthropic; empty defaults to ["openai"]
 }
 ```
 
@@ -105,7 +106,23 @@ ServeHTTPForAI()
 - **cluster 级 fallback**：由 `ServeHTTPForAI()` 控制，在 target 失败或后端 5xx 时切换到下一个 fallback cluster；
 - **Key 级重试**：由 `aiClusterInvoke()` 控制，在同一 cluster 内多个 API-Key 之间选择/重试。
 
-### 3.2 `aiClusterInvoke()` 改造
+### 3.2 协议风格识别与匹配
+
+BFE 在 `doSingleAIForward()` 中根据请求特征识别协议/认证风格（`AuthStyle`）：
+
+- 请求路径以 `/v1/messages` 开头 → `anthropic`；
+- 请求头存在 `x-api-key` 且不存在 `Authorization` → `anthropic`；
+- 否则默认 `openai`。
+
+识别结果写入 `AiBasicInfo.AuthStyle`，并用于：
+
+1. **协议匹配校验**：比较 `AuthStyle` 与 `cluster.AIConf.ModelProtocols`，不匹配时直接返回 400 `PROVIDER_PROTOCOL_MISMATCH`；
+2. **认证头注入**：`mod_ai_token_auth.SetApiKey()` 按 `AuthStyle` 注入 `Authorization: Bearer`（OpenAI）或 `x-api-key`（Anthropic）；
+3. **版本头注入**：Anthropic 风格下自动补 `anthropic-version: 2023-06-01`。
+
+`AIConf.ModelProtocols` 为空时默认仅支持 `openai`，保证旧配置向后兼容。
+
+### 3.3 `aiClusterInvoke()` 改造
 
 `aiClusterInvoke()` 新增 Key 级重试循环。为支持重试，将单次转发逻辑抽取为 `doSingleAIForward()`：
 
@@ -176,9 +193,21 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
         }
     }
 
-    // apply cluster.AIConf (api key)
-    if cluster.AIConf != nil && selectedKey.Key != "" {
-        mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key)
+    // apply cluster.AIConf (api key, provider, protocol)
+    if cluster.AIConf != nil {
+        if cluster.AIConf.Provider != "" {
+            aiMeta.Provider = cluster.AIConf.Provider
+        }
+        if selectedKey.Key != "" {
+            mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key, aiMeta.AuthStyle)
+        }
+    }
+
+    // Inject anthropic-version for Anthropic style requests if not present.
+    if aiMeta.AuthStyle == "anthropic" {
+        if outreq.Header.Get("anthropic-version") == "" {
+            outreq.Header.Set("anthropic-version", "2023-06-01")
+        }
     }
 
     // invoke cluster
@@ -263,7 +292,7 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 }
 ```
 
-### 3.3 Key 选择辅助函数
+### 3.4 Key 选择辅助函数
 
 ```go
 // aiKeyAttemptState tracks key usage within one aiClusterInvoke call
@@ -437,6 +466,7 @@ aiClusterInvoke: all ai keys exhausted for cluster[%s]
     "AIConf": {
         "Type": 0,
         "Provider": "deepseek",
+        "ModelProtocols": ["openai"],
         "Keys": [
             {
                 "Name": "key-primary",

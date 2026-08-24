@@ -426,14 +426,48 @@ func (e *RawEvent) GetQuotaUsage() QuotaUsage {
 	used := gjson.GetBytes(*e, "usage.total_tokens").Int()
 	prompt := gjson.GetBytes(*e, "usage.prompt_tokens").Int()
 	completion := gjson.GetBytes(*e, "usage.completion_tokens").Int()
-	if used > 0 {
+	cacheRead := gjson.GetBytes(*e, "usage.cache_read_tokens").Int()
+	cacheWrite := gjson.GetBytes(*e, "usage.cache_write_tokens").Int()
+	audioInput := gjson.GetBytes(*e, "usage.audio_input_tokens").Int()
+	audioOutput := gjson.GetBytes(*e, "usage.audio_output_tokens").Int()
+	imageCount := gjson.GetBytes(*e, "usage.image_count").Int()
+	if imageCount == 0 {
+		imageCount = gjson.GetBytes(*e, "data.#").Int()
+	}
+
+	// Claude fallback: input_tokens / output_tokens / cache_read_input_tokens / cache_creation_input_tokens
+	if prompt == 0 && completion == 0 {
+		prompt = gjson.GetBytes(*e, "usage.input_tokens").Int()
+		completion = gjson.GetBytes(*e, "usage.output_tokens").Int()
+		if cacheRead == 0 {
+			cacheRead = gjson.GetBytes(*e, "usage.cache_read_input_tokens").Int()
+		}
+		if cacheWrite == 0 {
+			cacheWrite = gjson.GetBytes(*e, "usage.cache_creation_input_tokens").Int()
+		}
+		if used == 0 {
+			used = prompt + completion
+		}
+	}
+
+	if used > 0 || imageCount > 0 {
 		isguess = false
 	} else {
 		curtoken = EstimateContentToken(string(*e))
 	}
 
-	return QuotaUsage{PromptTokens: prompt, CompletionTokens: completion, UsedQuota: used,
-		CurrentTokens: curtoken, IsGuess: isguess}
+	return QuotaUsage{
+		PromptTokens:      prompt,
+		CompletionTokens:  completion,
+		CacheReadTokens:   cacheRead,
+		CacheWriteTokens:  cacheWrite,
+		AudioInputTokens:  audioInput,
+		AudioOutputTokens: audioOutput,
+		ImageCount:        imageCount,
+		UsedQuota:         used,
+		CurrentTokens:     curtoken,
+		IsGuess:           isguess,
+	}
 }
 
 type LineDecoder struct {

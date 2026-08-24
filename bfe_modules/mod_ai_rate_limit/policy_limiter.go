@@ -106,6 +106,20 @@ func buildRpmInstId(rule *RPMRuleConf) string {
 	return fmt.Sprintf("rpm_%d_%d_%d", rule.TimeWindow, rule.MaxRequests, rule.Burst)
 }
 
+func buildTpmRedisKey(policyId string, rule *TPMRuleConf) string {
+	if rule.RedisKey != "" {
+		return buildRedisKey(policyId, rule.RedisKey)
+	}
+	return buildRedisKey(policyId, fmt.Sprintf("tpm_%s", buildTpmInstId(rule)))
+}
+
+func buildRpmRedisKey(policyId string, rule *RPMRuleConf) string {
+	if rule.RedisKey != "" {
+		return buildRedisKey(policyId, rule.RedisKey)
+	}
+	return buildRedisKey(policyId, fmt.Sprintf("rpm_%s", buildRpmInstId(rule)))
+}
+
 func newTpmLimiterItem(limiter *limit_rate.TPMLimiter, tpmInstId string, rule *TPMRuleConf) *tpmLimiterItem {
 	return &tpmLimiterItem{
 		limiter:     limiter,
@@ -135,7 +149,10 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 
 	for _, rule := range policy.Rules.TPM {
 		tpmInstId := buildTpmInstId(rule)
-		redisKey := buildRedisKey(policyId, fmt.Sprintf("tpm_%s", tpmInstId))
+		if rule.RedisKey != "" {
+			tpmInstId = rule.RedisKey
+		}
+		redisKey := buildTpmRedisKey(policyId, rule)
 		limiter := limit_rate.NewTPMLimiter(
 			redisKey,
 			rule.Threshold,
@@ -148,7 +165,10 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 
 	for _, rule := range policy.Rules.RPM {
 		rpmInstId := buildRpmInstId(rule)
-		redisKey := buildRedisKey(policyId, fmt.Sprintf("rpm_%s", rpmInstId))
+		if rule.RedisKey != "" {
+			rpmInstId = rule.RedisKey
+		}
+		redisKey := buildRpmRedisKey(policyId, rule)
 		limiter := limit_rate.NewQPMLimiter(
 			redisKey,
 			rule.Burst,
@@ -158,7 +178,7 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 		ps.rpmLimiters = append(ps.rpmLimiters, newRpmLimiterItem(limiter, rpmInstId, rule))
 	}
 
-	if policy.Rules.MaxConcurrency != nil {
+	if policy.Rules.MaxConcurrency != nil && *policy.Rules.MaxConcurrency > 0 {
 		redisKey := buildRedisKey(policyId, "con")
 		ps.conLimiter = &conLimiterItem{
 			conLimiter: limit_rate.NewConcurrencyLimiter(

@@ -23,6 +23,7 @@ package bfe_server
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -1451,6 +1452,22 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
 
 	req := basicReq.HttpRequest
 
+	// Detect request protocol/auth style if not already identified.
+	if aiMeta.AuthStyle == bfe_basic.AuthStyleUnknown || aiMeta.AuthStyle == "" {
+		aiMeta.AuthStyle = bfe_basic.DetectAuthStyle(basicReq)
+	}
+
+	// Reject if the cluster provider does not support the request protocol.
+	if cluster.AIConf != nil && !clusterSupportsAuthStyle(cluster.AIConf.ModelProtocols, aiMeta.AuthStyle) {
+		err := bfe_basic.NewAiError(
+			bfe_basic.CodeProviderProtocolMismatch,
+			bfe_basic.TypeInvalidRequestError,
+			fmt.Sprintf("request protocol %s not supported by cluster provider (model_protocols=%v)",
+				aiMeta.AuthStyle, cluster.AIConf.ModelProtocols),
+		)
+		return err.CreateErrorResponse(basicReq), closeAfterReply, nil
+	}
+
 	// prepare out request to downstream RS backend
 	outreq := new(bfe_http.Request)
 	*outreq = *req // includes shallow copies of maps, but okay
@@ -1522,7 +1539,14 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
 		}
 		aiMeta.AppendClusterKeyName(cluster.Name, selectedKey.Name)
 		if selectedKey.Key != "" {
-			mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key)
+			mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key, aiMeta.AuthStyle)
+		}
+	}
+
+	// Inject anthropic-version for Anthropic style requests if not present.
+	if aiMeta.AuthStyle == bfe_basic.AuthStyleAnthropic {
+		if outreq.Header.Get("anthropic-version") == "" {
+			outreq.Header.Set("anthropic-version", "2023-06-01")
 		}
 	}
 
@@ -1874,4 +1898,19 @@ func defaultAIKeyPolicy() cluster_conf.AIKeyPolicy {
 		RetryBackoffInitial: 500,
 		RetryBackoffMax:     5000,
 	}
+}
+
+// clusterSupportsAuthStyle checks whether the cluster provider supports the
+// request protocol/auth style. An empty modelProtocols defaults to OpenAI
+// only for backward compatibility.
+func clusterSupportsAuthStyle(modelProtocols []string, authStyle string) bool {
+	if len(modelProtocols) == 0 {
+		return authStyle == bfe_basic.AuthStyleOpenAI
+	}
+	for _, mp := range modelProtocols {
+		if mp == authStyle {
+			return true
+		}
+	}
+	return false
 }

@@ -53,6 +53,7 @@ type AIConf struct {
     Keys         []AIKey            // multiple API keys; empty means no key injection
     KeyPolicy    *AIKeyPolicy       // key selection & retry policy
     ModelTable   *ModelTable        // pricing table, auto-filled by InnerAPI
+    ModelProtocols []string         // supported protocols: openai / anthropic; empty defaults to ["openai"]
 
     // 新增
     MatchPrefix string `json:"MatchPrefix,omitempty"` // 例如 "openrouter/"
@@ -226,6 +227,7 @@ ai-gateway-api 下发到 BFE 的 cluster 配置示例：
     "Provider": "openrouter",
     "MatchPrefix": "openrouter/",
     "StripPrefix": true,
+    "ModelProtocols": ["openai"],
     "Keys": [
       {
         "Name": "default",
