@@ -16,6 +16,7 @@ package mod_ai_rate_limit
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -108,6 +109,11 @@ func buildRpmInstId(rule *RPMRuleConf) string {
 
 func buildTpmRedisKey(policyId string, rule *TPMRuleConf) string {
 	if rule.RedisKey != "" {
+		// 新格式：控制面直接下发完整 Redis Key（以 default_bfe_ 开头）。
+		// 旧格式：控制面下发 suffix，需要拼接前缀。
+		if strings.HasPrefix(rule.RedisKey, "default_bfe_") {
+			return rule.RedisKey
+		}
 		return buildRedisKey(policyId, rule.RedisKey)
 	}
 	return buildRedisKey(policyId, fmt.Sprintf("tpm_%s", buildTpmInstId(rule)))
@@ -115,6 +121,9 @@ func buildTpmRedisKey(policyId string, rule *TPMRuleConf) string {
 
 func buildRpmRedisKey(policyId string, rule *RPMRuleConf) string {
 	if rule.RedisKey != "" {
+		if strings.HasPrefix(rule.RedisKey, "default_bfe_") {
+			return rule.RedisKey
+		}
 		return buildRedisKey(policyId, rule.RedisKey)
 	}
 	return buildRedisKey(policyId, fmt.Sprintf("rpm_%s", buildRpmInstId(rule)))
