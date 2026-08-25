@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bfenetworks/go-lib/log"
 	"github.com/bfenetworks/go-lib/quota"
@@ -142,6 +144,21 @@ type AIKeyPolicy struct {
 	RetryBackoffMax     int    // ms
 }
 
+// TimeRange defines a single time range within a week for a pricing tier.
+// Weekdays uses Go's weekday convention: 0=Sunday, 1=Monday, ..., 6=Saturday.
+// An empty Weekdays slice means the range applies every day.
+type TimeRange struct {
+	Weekdays []int  // 0=Sunday, 1=Monday ... 6=Saturday; empty means every day
+	Start    string // "HH:MM"
+	End      string // "HH:MM", must be > Start; cross-midnight ranges should be split
+}
+
+// PriceTier defines a named pricing tier (e.g., "peak") with its time ranges.
+type PriceTier struct {
+	Name       string      // tier name; initially only "peak" is supported
+	TimeRanges []TimeRange // hit any range means the request belongs to this tier
+}
+
 // ModelPrice represents a single model pricing entry in AIConf.ModelTable
 type ModelPrice struct {
 	Provider            string
@@ -151,17 +168,28 @@ type ModelPrice struct {
 	Capabilities        []string
 	SupportedParameters []string
 	Limits              map[string]interface{}
-	Prices              map[string]float64
+	Prices              map[string]float64            // default prices
+	TierPrices          map[string]map[string]float64 // tier name -> price table
 	Metadata            map[string]interface{}
+
+	// pricesInt and tierPricesInt are built at config load time.
+	pricesInt     map[string]int64
+	tierPricesInt map[string]map[string]int64
 }
 
 // ModelTable represents the cost/pricing table for a cluster
 type ModelTable struct {
 	Currency string // fixed "RMB" in v0.4
+	TimeZone string // default "Asia/Shanghai"
+	Tiers    []PriceTier
 	Models   []ModelPrice
 
 	// priceIndex is built at config load time: model -> mode -> *ModelPrice
 	priceIndex map[string]map[string]*ModelPrice
+	// tierIndex is built at config load time: tier name -> *PriceTier
+	tierIndex map[string]*PriceTier
+	// tz is parsed from TimeZone at config load time.
+	tz *time.Location
 }
 
 type AIConf struct {
@@ -202,6 +230,18 @@ const (
 	PriceOutputCostPerAudioTokenInt     = "output_cost_per_audio_token_int"
 	PriceOutputCostPerImageInt          = "output_cost_per_image_int"
 )
+
+// priceKeyToIntKey maps the public price keys (used in config files) to the
+// internal fixed-point integer keys used at runtime.
+var priceKeyToIntKey = map[string]string{
+	PriceInputCostPerToken:           PriceInputCostPerTokenInt,
+	PriceOutputCostPerToken:          PriceOutputCostPerTokenInt,
+	PriceCacheReadInputTokenCost:     PriceCacheReadInputTokenCostInt,
+	PriceCacheCreationInputTokenCost: PriceCacheCreationInputTokenCostInt,
+	PriceInputCostPerAudioToken:      PriceInputCostPerAudioTokenInt,
+	PriceOutputCostPerAudioToken:     PriceOutputCostPerAudioTokenInt,
+	PriceOutputCostPerImage:          PriceOutputCostPerImageInt,
+}
 
 func (conf *BackendHTTPS) GetProtocol() string {
 	return conf.protocol
@@ -794,6 +834,89 @@ func AIConfCheck(conf *AIConf) error {
 	return nil
 }
 
+// containsInt reports whether vals contains target.
+func containsInt(vals []int, target int) bool {
+	for _, v := range vals {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
+// minutesFromHHMM parses "HH:MM" into minutes since midnight.
+func minutesFromHHMM(s string) (int, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid time format %s, expected HH:MM", s)
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, fmt.Errorf("invalid hour in %s", s)
+	}
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, fmt.Errorf("invalid minute in %s", s)
+	}
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, fmt.Errorf("time %s out of range", s)
+	}
+	return hour*60 + minute, nil
+}
+
+// timeRangesOverlap reports whether two time ranges overlap.
+// Both ranges are within the same day and use half-open intervals [start, end).
+func timeRangesOverlap(a, b TimeRange) bool {
+	if len(a.Weekdays) > 0 && len(b.Weekdays) > 0 {
+		sharedWeekday := false
+		for _, wd := range a.Weekdays {
+			if containsInt(b.Weekdays, wd) {
+				sharedWeekday = true
+				break
+			}
+		}
+		if !sharedWeekday {
+			return false
+		}
+	}
+	aStart, _ := minutesFromHHMM(a.Start)
+	aEnd, _ := minutesFromHHMM(a.End)
+	bStart, _ := minutesFromHHMM(b.Start)
+	bEnd, _ := minutesFromHHMM(b.End)
+	return aStart < bEnd && bStart < aEnd
+}
+
+// validateTimeRanges checks a list of time ranges for a single tier.
+func validateTimeRanges(tierName string, ranges []TimeRange) error {
+	if len(ranges) == 0 {
+		return fmt.Errorf("tier %s has no time_ranges", tierName)
+	}
+	for i, tr := range ranges {
+		for _, wd := range tr.Weekdays {
+			if wd < 0 || wd > 6 {
+				return fmt.Errorf("tier %s time_ranges[%d].weekdays contains invalid weekday %d", tierName, i, wd)
+			}
+		}
+		start, err := minutesFromHHMM(tr.Start)
+		if err != nil {
+			return fmt.Errorf("tier %s time_ranges[%d].start: %v", tierName, i, err)
+		}
+		end, err := minutesFromHHMM(tr.End)
+		if err != nil {
+			return fmt.Errorf("tier %s time_ranges[%d].end: %v", tierName, i, err)
+		}
+		if end <= start {
+			return fmt.Errorf("tier %s time_ranges[%d].end must be greater than start", tierName, i)
+		}
+		for j := 0; j < i; j++ {
+			if timeRangesOverlap(ranges[i], ranges[j]) {
+				return fmt.Errorf("tier %s time_ranges[%d] overlaps with time_ranges[%d]", tierName, i, j)
+			}
+		}
+	}
+	return nil
+}
+
 // ModelTableCheck checks and initializes ModelTable.
 // It converts float prices to fixed-point integers and builds priceIndex.
 func ModelTableCheck(table *ModelTable) error {
@@ -803,6 +926,30 @@ func ModelTableCheck(table *ModelTable) error {
 
 	if table.Currency != quota.UnitRMB {
 		return fmt.Errorf("currency must be %s", quota.UnitRMB)
+	}
+
+	if table.TimeZone == "" {
+		table.TimeZone = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(table.TimeZone)
+	if err != nil {
+		return fmt.Errorf("invalid TimeZone %s: %v", table.TimeZone, err)
+	}
+	table.tz = loc
+
+	table.tierIndex = make(map[string]*PriceTier)
+	for i := range table.Tiers {
+		tier := &table.Tiers[i]
+		if tier.Name == "" {
+			return errors.New("tier name is empty")
+		}
+		if tier.Name != "peak" {
+			return fmt.Errorf("unsupported tier name %s, only 'peak' is allowed", tier.Name)
+		}
+		if err := validateTimeRanges(tier.Name, tier.TimeRanges); err != nil {
+			return err
+		}
+		table.tierIndex[tier.Name] = tier
 	}
 
 	table.priceIndex = make(map[string]map[string]*ModelPrice)
@@ -829,13 +976,33 @@ func ModelTableCheck(table *ModelTable) error {
 			return fmt.Errorf("negative price for model %s", price.Model)
 		}
 
-		price.Prices[PriceInputCostPerTokenInt] = float64(quota.RmbToFixedPoint(input))
-		price.Prices[PriceOutputCostPerTokenInt] = float64(quota.RmbToFixedPoint(output))
-		price.Prices[PriceCacheReadInputTokenCostInt] = float64(quota.RmbToFixedPoint(cacheRead))
-		price.Prices[PriceCacheCreationInputTokenCostInt] = float64(quota.RmbToFixedPoint(cacheWrite))
-		price.Prices[PriceInputCostPerAudioTokenInt] = float64(quota.RmbToFixedPoint(audioInput))
-		price.Prices[PriceOutputCostPerAudioTokenInt] = float64(quota.RmbToFixedPoint(audioOutput))
-		price.Prices[PriceOutputCostPerImageInt] = float64(quota.RmbToFixedPoint(outputCostPerImage))
+		price.pricesInt = make(map[string]int64)
+		price.pricesInt[PriceInputCostPerTokenInt] = quota.RmbToFixedPoint(input)
+		price.pricesInt[PriceOutputCostPerTokenInt] = quota.RmbToFixedPoint(output)
+		price.pricesInt[PriceCacheReadInputTokenCostInt] = quota.RmbToFixedPoint(cacheRead)
+		price.pricesInt[PriceCacheCreationInputTokenCostInt] = quota.RmbToFixedPoint(cacheWrite)
+		price.pricesInt[PriceInputCostPerAudioTokenInt] = quota.RmbToFixedPoint(audioInput)
+		price.pricesInt[PriceOutputCostPerAudioTokenInt] = quota.RmbToFixedPoint(audioOutput)
+		price.pricesInt[PriceOutputCostPerImageInt] = quota.RmbToFixedPoint(outputCostPerImage)
+
+		price.tierPricesInt = make(map[string]map[string]int64)
+		for tierName, tierPriceMap := range price.TierPrices {
+			if tierName != "peak" {
+				return fmt.Errorf("unsupported tier name %s in TierPrices for model %s, only 'peak' is allowed", tierName, price.Model)
+			}
+			intMap := make(map[string]int64)
+			for key, val := range tierPriceMap {
+				if val < 0 {
+					return fmt.Errorf("negative tier price %s for model %s tier %s", key, price.Model, tierName)
+				}
+				intKey := key
+				if mapped, ok := priceKeyToIntKey[key]; ok {
+					intKey = mapped
+				}
+				intMap[intKey] = quota.RmbToFixedPoint(val)
+			}
+			price.tierPricesInt[tierName] = intMap
+		}
 
 		if table.priceIndex[price.Model] == nil {
 			table.priceIndex[price.Model] = make(map[string]*ModelPrice)
@@ -847,6 +1014,48 @@ func ModelTableCheck(table *ModelTable) error {
 	}
 
 	return nil
+}
+
+// ActiveTierName returns the name of the tier active at the given time.
+// If no tier matches, it returns an empty string (fallback to default prices).
+func (table *ModelTable) ActiveTierName(now time.Time) string {
+	if table == nil || len(table.Tiers) == 0 || table.tz == nil {
+		return ""
+	}
+	t := now.In(table.tz)
+	wd := int(t.Weekday())
+	cur := t.Hour()*60 + t.Minute()
+
+	for i := range table.Tiers {
+		tier := &table.Tiers[i]
+		for _, tr := range tier.TimeRanges {
+			if len(tr.Weekdays) > 0 && !containsInt(tr.Weekdays, wd) {
+				continue
+			}
+			start, _ := minutesFromHHMM(tr.Start)
+			end, _ := minutesFromHHMM(tr.End)
+			if start <= cur && cur < end {
+				return tier.Name
+			}
+		}
+	}
+	return ""
+}
+
+// GetPriceInt returns the fixed-point price for the given tier and key.
+// If tier is empty or the tier/key is not configured, it falls back to default Prices.
+func (p *ModelPrice) GetPriceInt(tier, key string) int64 {
+	if tier != "" && p.tierPricesInt != nil {
+		if tierMap, ok := p.tierPricesInt[tier]; ok {
+			if v, ok := tierMap[key]; ok {
+				return v
+			}
+		}
+	}
+	if p.pricesInt != nil {
+		return p.pricesInt[key]
+	}
+	return 0
 }
 
 // LookupModelPrice looks up a model price entry by model and mode.

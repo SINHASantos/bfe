@@ -16,6 +16,7 @@ package cluster_conf
 
 import (
 	"testing"
+	"time"
 )
 
 func TestClusterConfLoad_1(t *testing.T) {
@@ -144,11 +145,11 @@ func TestModelTableCheck(t *testing.T) {
 		if entry == nil {
 			t.Fatal("LookupModelPrice should return entry")
 		}
-		if entry.Prices[PriceInputCostPerTokenInt] != 100 {
-			t.Errorf("input cost int = %v, want 100", entry.Prices[PriceInputCostPerTokenInt])
+		if entry.GetPriceInt("", PriceInputCostPerTokenInt) != 100 {
+			t.Errorf("input cost int = %v, want 100", entry.GetPriceInt("", PriceInputCostPerTokenInt))
 		}
-		if entry.Prices[PriceOutputCostPerTokenInt] != 200 {
-			t.Errorf("output cost int = %v, want 200", entry.Prices[PriceOutputCostPerTokenInt])
+		if entry.GetPriceInt("", PriceOutputCostPerTokenInt) != 200 {
+			t.Errorf("output cost int = %v, want 200", entry.GetPriceInt("", PriceOutputCostPerTokenInt))
 		}
 	})
 
@@ -175,11 +176,11 @@ func TestModelTableCheck(t *testing.T) {
 		if entry == nil {
 			t.Fatal("LookupModelPrice should return entry")
 		}
-		if entry.Prices[PriceCacheReadInputTokenCostInt] != 45 {
-			t.Errorf("cache read cost int = %v, want 45", entry.Prices[PriceCacheReadInputTokenCostInt])
+		if entry.GetPriceInt("", PriceCacheReadInputTokenCostInt) != 45 {
+			t.Errorf("cache read cost int = %v, want 45", entry.GetPriceInt("", PriceCacheReadInputTokenCostInt))
 		}
-		if entry.Prices[PriceCacheCreationInputTokenCostInt] != 565 {
-			t.Errorf("cache write cost int = %v, want 565", entry.Prices[PriceCacheCreationInputTokenCostInt])
+		if entry.GetPriceInt("", PriceCacheCreationInputTokenCostInt) != 565 {
+			t.Errorf("cache write cost int = %v, want 565", entry.GetPriceInt("", PriceCacheCreationInputTokenCostInt))
 		}
 	})
 
@@ -206,11 +207,11 @@ func TestModelTableCheck(t *testing.T) {
 		if entry == nil {
 			t.Fatal("LookupModelPrice should return entry")
 		}
-		if entry.Prices[PriceInputCostPerAudioTokenInt] != 2288 {
-			t.Errorf("audio input cost int = %v, want 2288", entry.Prices[PriceInputCostPerAudioTokenInt])
+		if entry.GetPriceInt("", PriceInputCostPerAudioTokenInt) != 2288 {
+			t.Errorf("audio input cost int = %v, want 2288", entry.GetPriceInt("", PriceInputCostPerAudioTokenInt))
 		}
-		if entry.Prices[PriceOutputCostPerAudioTokenInt] != 4576 {
-			t.Errorf("audio output cost int = %v, want 4576", entry.Prices[PriceOutputCostPerAudioTokenInt])
+		if entry.GetPriceInt("", PriceOutputCostPerAudioTokenInt) != 4576 {
+			t.Errorf("audio output cost int = %v, want 4576", entry.GetPriceInt("", PriceOutputCostPerAudioTokenInt))
 		}
 	})
 
@@ -292,4 +293,292 @@ func TestAIConfCheck(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestModelTableCheck_Tiers(t *testing.T) {
+	validPeakTier := PriceTier{
+		Name: "peak",
+		TimeRanges: []TimeRange{
+			{Weekdays: []int{1, 2, 3, 4, 5}, Start: "09:00", End: "12:00"},
+			{Weekdays: []int{1, 2, 3, 4, 5}, Start: "14:00", End: "18:00"},
+		},
+	}
+
+	t.Run("valid peak tier", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			TimeZone: "Asia/Shanghai",
+			Tiers:    []PriceTier{validPeakTier},
+			Models: []ModelPrice{
+				{
+					Model: "m",
+					Mode:  "chat",
+					Prices: map[string]float64{
+						PriceInputCostPerToken:  1,
+						PriceOutputCostPerToken: 1,
+					},
+				},
+			},
+		}
+		if err := ModelTableCheck(table); err != nil {
+			t.Fatalf("ModelTableCheck failed: %v", err)
+		}
+		if table.tz == nil {
+			t.Error("tz should be set")
+		}
+		if table.tierIndex["peak"] == nil {
+			t.Error("tierIndex should contain peak")
+		}
+	})
+
+	t.Run("default timezone", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers:    []PriceTier{validPeakTier},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err != nil {
+			t.Fatalf("ModelTableCheck failed: %v", err)
+		}
+		if table.TimeZone != "Asia/Shanghai" {
+			t.Errorf("timezone = %s, want Asia/Shanghai", table.TimeZone)
+		}
+	})
+
+	t.Run("invalid timezone", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			TimeZone: "Mars/Phobos",
+			Tiers:    []PriceTier{validPeakTier},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for invalid timezone")
+		}
+	})
+
+	t.Run("unsupported tier name", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers: []PriceTier{
+				{Name: "off_peak", TimeRanges: []TimeRange{{Start: "00:00", End: "09:00"}}},
+			},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for unsupported tier name")
+		}
+	})
+
+	t.Run("empty tier name", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers:    []PriceTier{{Name: "", TimeRanges: []TimeRange{{Start: "00:00", End: "09:00"}}}},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for empty tier name")
+		}
+	})
+
+	t.Run("no time ranges", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers:    []PriceTier{{Name: "peak"}},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for tier without time ranges")
+		}
+	})
+
+	t.Run("invalid weekday", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers: []PriceTier{
+				{Name: "peak", TimeRanges: []TimeRange{{Weekdays: []int{7}, Start: "09:00", End: "12:00"}}},
+			},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for invalid weekday")
+		}
+	})
+
+	t.Run("end before start", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers: []PriceTier{
+				{Name: "peak", TimeRanges: []TimeRange{{Weekdays: []int{1}, Start: "12:00", End: "09:00"}}},
+			},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error when end <= start")
+		}
+	})
+
+	t.Run("overlapping time ranges", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Tiers: []PriceTier{
+				{
+					Name: "peak",
+					TimeRanges: []TimeRange{
+						{Weekdays: []int{1}, Start: "09:00", End: "12:00"},
+						{Weekdays: []int{1}, Start: "11:00", End: "14:00"},
+					},
+				},
+			},
+			Models: []ModelPrice{
+				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for overlapping time ranges")
+		}
+	})
+
+	t.Run("unsupported tier price name", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Models: []ModelPrice{
+				{
+					Model: "m",
+					Mode:  "chat",
+					Prices: map[string]float64{
+						PriceInputCostPerToken:  1,
+						PriceOutputCostPerToken: 1,
+					},
+					TierPrices: map[string]map[string]float64{
+						"off_peak": {PriceInputCostPerToken: 2},
+					},
+				},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for unsupported tier price name")
+		}
+	})
+
+	t.Run("negative tier price", func(t *testing.T) {
+		table := &ModelTable{
+			Currency: "RMB",
+			Models: []ModelPrice{
+				{
+					Model: "m",
+					Mode:  "chat",
+					Prices: map[string]float64{
+						PriceInputCostPerToken:  1,
+						PriceOutputCostPerToken: 1,
+					},
+					TierPrices: map[string]map[string]float64{
+						"peak": {PriceInputCostPerToken: -1},
+					},
+				},
+			},
+		}
+		if err := ModelTableCheck(table); err == nil {
+			t.Error("expected error for negative tier price")
+		}
+	})
+}
+
+func TestActiveTierName(t *testing.T) {
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location failed: %v", err)
+	}
+
+	table := &ModelTable{
+		Currency: "RMB",
+		TimeZone: "Asia/Shanghai",
+		Tiers: []PriceTier{
+			{
+				Name: "peak",
+				TimeRanges: []TimeRange{
+					{Weekdays: []int{1, 2, 3, 4, 5}, Start: "09:00", End: "12:00"},
+					{Weekdays: []int{1, 2, 3, 4, 5}, Start: "14:00", End: "18:00"},
+				},
+			},
+		},
+	}
+	if err := ModelTableCheck(table); err != nil {
+		t.Fatalf("ModelTableCheck failed: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		moment   time.Time
+		expected string
+	}{
+		{"monday 10:00 peak", time.Date(2026, 8, 24, 10, 0, 0, 0, shanghai), "peak"},
+		{"monday 13:00 off-peak", time.Date(2026, 8, 24, 13, 0, 0, 0, shanghai), ""},
+		{"saturday 10:00 weekend", time.Date(2026, 8, 22, 10, 0, 0, 0, shanghai), ""},
+		{"monday 18:00 half-open end", time.Date(2026, 8, 24, 18, 0, 0, 0, shanghai), ""},
+		{"monday 09:00 half-open start", time.Date(2026, 8, 24, 9, 0, 0, 0, shanghai), "peak"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := table.ActiveTierName(c.moment); got != c.expected {
+				t.Errorf("ActiveTierName = %q, want %q", got, c.expected)
+			}
+		})
+	}
+}
+
+func TestGetPriceInt(t *testing.T) {
+	table := &ModelTable{
+		Currency: "RMB",
+		Models: []ModelPrice{
+			{
+				Model: "m",
+				Mode:  "chat",
+				Prices: map[string]float64{
+					PriceInputCostPerToken:  1,
+					PriceOutputCostPerToken: 2,
+				},
+				TierPrices: map[string]map[string]float64{
+					"peak": {
+						PriceInputCostPerToken: 10,
+					},
+				},
+			},
+		},
+	}
+	if err := ModelTableCheck(table); err != nil {
+		t.Fatalf("ModelTableCheck failed: %v", err)
+	}
+	entry := LookupModelPrice(table, "m", "chat")
+	if entry == nil {
+		t.Fatal("LookupModelPrice should return entry")
+	}
+
+	if got := entry.GetPriceInt("", PriceInputCostPerTokenInt); got != 100000000 {
+		t.Errorf("default input cost = %d, want 100000000", got)
+	}
+	if got := entry.GetPriceInt("peak", PriceInputCostPerTokenInt); got != 1000000000 {
+		t.Errorf("peak input cost = %d, want 1000000000", got)
+	}
+	if got := entry.GetPriceInt("peak", PriceOutputCostPerTokenInt); got != 200000000 {
+		t.Errorf("peak output cost (fallback) = %d, want 200000000", got)
+	}
+	if got := entry.GetPriceInt("nonexistent", PriceInputCostPerTokenInt); got != 100000000 {
+		t.Errorf("nonexistent tier fallback = %d, want 100000000", got)
+	}
 }

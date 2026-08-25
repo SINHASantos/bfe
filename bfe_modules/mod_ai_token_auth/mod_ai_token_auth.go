@@ -17,6 +17,7 @@ package mod_ai_token_auth
 import (
 	"fmt"
 	"net/url"
+	"time"
 
 	"github.com/bfenetworks/go-lib/log"
 	"github.com/bfenetworks/go-lib/quota"
@@ -491,21 +492,26 @@ func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe
 		return 0
 	}
 
+	tierName := ""
+	if cluster.AIConf.ModelTable != nil {
+		tierName = cluster.AIConf.ModelTable.ActiveTierName(time.Now())
+	}
+
 	switch mode {
 	case bfe_basic.ModeImageGeneration:
-		return calcImageGenerationCost(entry, usage)
+		return calcImageGenerationCost(entry, usage, tierName)
 	default:
-		return calcChatCost(entry, usage)
+		return calcChatCost(entry, usage, tierName)
 	}
 }
 
-func calcImageGenerationCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage) int64 {
+func calcImageGenerationCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage, tierName string) int64 {
 	imageCount := usage.ImageCount
 	if imageCount < 0 {
 		imageCount = 0
 	}
 
-	costPerImage := int64(entry.Prices[cluster_conf.PriceOutputCostPerImageInt])
+	costPerImage := entry.GetPriceInt(tierName, cluster_conf.PriceOutputCostPerImageInt)
 	if costPerImage < 0 {
 		log.Logger.Warn("invalid model price for image generation model %s", entry.Model)
 		return 0
@@ -514,9 +520,9 @@ func calcImageGenerationCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.To
 	return imageCount * costPerImage
 }
 
-func calcChatCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage) int64 {
-	inputCost := int64(entry.Prices[cluster_conf.PriceInputCostPerTokenInt])
-	outputCost := int64(entry.Prices[cluster_conf.PriceOutputCostPerTokenInt])
+func calcChatCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage, tierName string) int64 {
+	inputCost := entry.GetPriceInt(tierName, cluster_conf.PriceInputCostPerTokenInt)
+	outputCost := entry.GetPriceInt(tierName, cluster_conf.PriceOutputCostPerTokenInt)
 	if inputCost < 0 || outputCost < 0 {
 		log.Logger.Warn("invalid model price for model %s", entry.Model)
 		return 0
@@ -552,10 +558,10 @@ func calcChatCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage) i
 		audioOutputTokens = completionTokens
 	}
 
-	cacheReadCost := int64(entry.Prices[cluster_conf.PriceCacheReadInputTokenCostInt])
-	cacheWriteCost := int64(entry.Prices[cluster_conf.PriceCacheCreationInputTokenCostInt])
-	audioInputCost := int64(entry.Prices[cluster_conf.PriceInputCostPerAudioTokenInt])
-	audioOutputCost := int64(entry.Prices[cluster_conf.PriceOutputCostPerAudioTokenInt])
+	cacheReadCost := entry.GetPriceInt(tierName, cluster_conf.PriceCacheReadInputTokenCostInt)
+	cacheWriteCost := entry.GetPriceInt(tierName, cluster_conf.PriceCacheCreationInputTokenCostInt)
+	audioInputCost := entry.GetPriceInt(tierName, cluster_conf.PriceInputCostPerAudioTokenInt)
+	audioOutputCost := entry.GetPriceInt(tierName, cluster_conf.PriceOutputCostPerAudioTokenInt)
 
 	// normal input/output start as the full totals
 	normalInput := promptTokens

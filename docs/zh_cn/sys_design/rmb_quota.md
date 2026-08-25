@@ -27,7 +27,8 @@ v0.6 引入 **图像生成按次计费**：图像生成模型（如 `flux-2-pro`
 4. 新增共享库 `go-lib/quota`，提供 RMB 定点数转换，供 ai-gateway-api 与 BFE 共同引用；
 5. Redis Lua 支持 RMB 扣减脚本，当前暂时使用单 Key 定点数方案；
 6. 支持按 `cache_read_tokens` / `cache_write_tokens` / `audio_input_tokens` / `audio_output_tokens` 子项拆分计费，并与普通 input/output 价格共存；
-7. 支持图像生成模型按 `image_count` 与 `output_cost_per_image` 计费，并按请求路径识别 `mode`。
+7. 支持图像生成模型按 `image_count` 与 `output_cost_per_image` 计费，并按请求路径识别 `mode`；
+8. v0.5 引入 **分时段/分工作日计费**：`ModelTable` 支持 `TimeZone` 与 `Tiers` 定义，`ModelPrice` 支持 `TierPrices`，请求发生时按当前时刻匹配 tier，命中则取 tier 价格，未命中 fallback 到默认 `Prices`；**初期 tier name 只支持 `peak`**。
 
 ## 2. 设计原则
 
@@ -160,6 +161,69 @@ func buildModelTableIndex(table *ModelTable) error {
 > - 转换后 BFE 内部及 Redis Lua 中只使用整数，避免浮点误差。
 > - conf-agent 不感知 `unit` 类型，也不修改价格格式。
 > - `go-lib/quota` 同时被 ai-gateway-api 和 BFE 引用，保证管理面与数据面对 Redis 值的解释完全一致。
+
+### 4.5 分时段/分工作日计费配置
+
+v0.5 在 `ModelTable` 与 `ModelPrice` 中扩展分时段计费字段：
+
+```go
+type TimeRange struct {
+    Weekdays []int  // 0=周日, 1=周一 ... 6=周六；为空表示每天
+    Start    string // "HH:MM"
+    End      string // "HH:MM"，必须 > Start；跨午夜请拆成两段
+}
+
+type PriceTier struct {
+    Name       string      // 初期只支持 "peak"
+    TimeRanges []TimeRange // 命中任意一个即属于该 Tier
+}
+
+type ModelPrice struct {
+    Provider            string
+    Model               string
+    BaseModel           string
+    Mode                string
+    Capabilities        []string
+    SupportedParameters []string
+    Limits              map[string]interface{}
+    Prices              map[string]float64            // 默认价格
+    TierPrices          map[string]map[string]float64 // tier name -> 价格表
+    Metadata            map[string]interface{}
+
+    // 运行时字段：配置加载阶段预计算定点整数
+    pricesInt     map[string]int64
+    tierPricesInt map[string]map[string]int64
+}
+
+type ModelTable struct {
+    Currency string       // 仍是 "RMB"
+    TimeZone string       // 默认 "Asia/Shanghai"
+    Tiers    []PriceTier  // 时段定义
+    Models   []ModelPrice
+
+    priceIndex map[string]map[string]*ModelPrice
+    tierIndex  map[string]*PriceTier
+    tz         *time.Location
+}
+```
+
+配置归属：provider/cluster 分离后，时段模板（`time_zone`、`tiers`）由 `/providers` 维护，通过独立接口 `PUT /providers/{provider_name}/pricing-tiers` 设置；模型级分时段价格（`tier_prices`）保留在 `/model-prices`。`ai-gateway-api` 导出 BFE 配置时，把同一 provider 的时段模板与 model-prices 的价格数据拼接成 `AIConf.ModelTable`。
+
+校验规则：
+
+1. `ModelTable.TimeZone` 为空时默认 `"Asia/Shanghai"`，须为合法 IANA 时区名。
+2. `Tiers` 中每个 tier 必须包含非空 `Name` 和至少一个 `TimeRange`。
+3. **初期 `Tiers` 中 tier 的 `Name` 只支持 `"peak"`**。
+4. `TimeRange.Weekdays` 元素必须在 `0-6` 之间；为空表示每天。
+5. `TimeRange.Start` / `End` 格式为 `"HH:MM"`，且 `End` > `Start`；跨午夜需拆成两段。
+6. 同一 tier 内部 `TimeRanges` 不得重叠；不同 tier 之间允许重叠，按列表顺序匹配第一个。
+7. `TierPrices` 中 tier name **初期只支持 `"peak"`**；内部价格键名须为 `Prices` 的合法枚举键；`TierPrices` 与 `Tiers` 不做强制引用校验，未在 `Tiers` 中定义的 tier name 运行时自然无法命中。
+
+加载阶段处理：
+
+- 解析 `TimeZone` 并缓存 `*time.Location`。
+- 构建 `tierIndex[name] -> *PriceTier`，便于运行时 O(1) 查询。
+- 将 `TierPrices` 中每个 tier 的价格表同样通过 `go-lib/quota.RmbToFixedPoint` 转换为定点整数，存入 `tierPricesInt`。
 
 ## 5. 共享库 `go-lib/quota`
 
@@ -610,6 +674,75 @@ func lookupModelPrice(table *cluster_conf.ModelTable, model, mode string) *clust
 
 索引在配置加载阶段构建，运行时按 `(model, mode)` 精确查询，为 O(1)。`mode` 由请求路径推断（如 `/v1/images/generations` → `image_generation`，`/v1/chat/completions` → `chat`），未识别时默认 `chat`。未命中时返回 `nil`，由调用方决定是否按 `0` 成本处理。
 
+### 7.8 分时段计费运行时匹配
+
+`ModelTable` 在运行时根据请求发生时刻（取 BFE 本地时间，按 `TimeZone` 转换）匹配活跃 tier：
+
+```go
+func (table *ModelTable) ActiveTierName(now time.Time) string {
+    if table == nil || len(table.Tiers) == 0 {
+        return ""
+    }
+    t := now.In(table.tz)
+    wd := int(t.Weekday())
+    hour, min := t.Hour(), t.Minute()
+    cur := hour*60 + min
+
+    for i := range table.Tiers {
+        tier := &table.Tiers[i]
+        for _, tr := range tier.TimeRanges {
+            if len(tr.Weekdays) > 0 && !containsInt(tr.Weekdays, wd) {
+                continue
+            }
+            start := parseHHMM(tr.Start)
+            end := parseHHMM(tr.End)
+            if start <= cur && cur < end {
+                return tier.Name
+            }
+        }
+    }
+    return ""
+}
+
+func (p *ModelPrice) GetPriceInt(tier, key string) int64 {
+    if tier != "" && p.tierPricesInt != nil {
+        if tierMap, ok := p.tierPricesInt[tier]; ok {
+            if v, ok := tierMap[key]; ok {
+                return v
+            }
+        }
+    }
+    if p.pricesInt != nil {
+        return p.pricesInt[key]
+    }
+    return 0
+}
+```
+
+`calcCostUnits` 在计算成本前先调用 `ActiveTierName`，再按 tier 取价。以 `chat` 模式为例，`calcChatCost` 在读取 `inputCost`、`outputCost`、`cacheReadCost` 等定点整数价格时，均通过 `GetPriceInt(tierName, key)` 获取：命中 `peak` tier 且 `TierPrices.peak` 中配置了该键，则使用 tier 价格；否则 fallback 到默认 `Prices`。
+
+```go
+func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe_basic.ServerDataConfInterface, usage *bfe_basic.TokenUsage) int64 {
+    // ... 查找 entry ...
+
+    tierName := cluster.AIConf.ModelTable.ActiveTierName(time.Now())
+
+    inputCost := entry.GetPriceInt(tierName, cluster_conf.PriceInputCostPerTokenInt)
+    outputCost := entry.GetPriceInt(tierName, cluster_conf.PriceOutputCostPerTokenInt)
+    cacheReadCost := entry.GetPriceInt(tierName, cluster_conf.PriceCacheReadInputTokenCostInt)
+    // ... 其他子项价格同样按 tierName 获取 ...
+
+    // 后续 cache/audio 拆分与 7.6 节一致
+}
+```
+
+计费规则：
+
+- 命中 `peak` tier：所有价格优先取 `TierPrices.peak`；若某键未配置，fallback 到默认 `Prices`。
+- 未命中任何 tier：全部使用默认 `Prices`，行为与 v0.4 完全一致。
+- `Tiers` 为空或 `TierPrices` 为空：直接退化到固定价格逻辑。
+- 区间采用左闭右开 `[Start, End)`，例如 `18:00` 不命中 `09:00-18:00`。
+
 ## 8. Redis Lua 脚本改造
 
 当前 Token 配额 Lua：
@@ -768,6 +901,64 @@ return {yuan, frac}
 
 > 上例中 `input_cost_per_token = 0.000001` 元/Token，换算为固定点整数即 `100`（= 0.000001 * 1e8），表示 **0.1 元 / 百万 Token**；`cache_read_input_token_cost` 等子项价格同样通过 `quota.RmbToFixedPoint` 转换为定点整数；`output_cost_per_image = 0.03` 元/张，换算为定点整数 `3000000`。
 
+### 9.2 分时段计费配置示例（DeepSeek）
+
+以 DeepSeek-V4-Pro 为例，北京时间周一至周五 `09:00-12:00`、`14:00-18:00` 为高峰时段，其余时间（含工作日非高峰及周末）为空闲时段；空闲价格为高峰价格的一半：
+
+```json
+{
+    "AIConf": {
+        "Type": 0,
+        "Provider": "deepseek",
+        "ModelTable": {
+            "Currency": "RMB",
+            "TimeZone": "Asia/Shanghai",
+            "Tiers": [
+                {
+                    "Name": "peak",
+                    "TimeRanges": [
+                        { "Weekdays": [1, 2, 3, 4, 5], "Start": "09:00", "End": "12:00" },
+                        { "Weekdays": [1, 2, 3, 4, 5], "Start": "14:00", "End": "18:00" }
+                    ]
+                }
+            ],
+            "Models": [
+                {
+                    "Provider": "deepseek",
+                    "Model": "deepseek-v4-pro",
+                    "BaseModel": "deepseek-v4-pro",
+                    "Mode": "chat",
+                    "Capabilities": ["chat", "reasoning", "tools", "prompt_caching"],
+                    "SupportedParameters": ["temperature", "max_tokens"],
+                    "Limits": {
+                        "context_window": 128000,
+                        "max_input_tokens": 128000,
+                        "max_output_tokens": 8192
+                    },
+                    "Prices": {
+                        "input_cost_per_token": 4.5e-06,
+                        "output_cost_per_token": 1.35e-05,
+                        "cache_read_input_token_cost": 1.5e-07
+                    },
+                    "TierPrices": {
+                        "peak": {
+                            "input_cost_per_token": 9.0e-06,
+                            "output_cost_per_token": 2.7e-05,
+                            "cache_read_input_token_cost": 3.0e-07
+                        }
+                    }
+                }
+            ]
+        }
+    }
+}
+```
+
+> 说明：
+> - 本示例只定义 `peak` tier；未命中高峰时段时，`calcChatCost` 自动使用默认 `Prices`（即空闲价格）。
+> - `TierPrices.peak` 中未配置的键将 fallback 到 `Prices` 中的对应键。
+> - 若后续需要把周末等时段单独定价，可新增 tier 并通过 `Weekdays` 指定，无需修改计费逻辑。
+
 ## 10. 测试建议
 
 1. **单元测试**
@@ -778,6 +969,8 @@ return {yuan, frac}
      - 覆盖子项用量大于总量时的 clamp 行为；
      - 覆盖未配置子项价格时回退到普通 input/output 价格的行为；
      - 覆盖 `image_generation` 模式按 `image_count × output_cost_per_image` 计费，以及未配置 `output_cost_per_image` 时按 0 成本处理。
+   - `ActiveTierName`：验证北京时区周一 10:00 命中 `peak`、周一 13:00 未命中、周六 10:00 未命中、周一 18:00 不命中（左闭右开）。
+   - `GetPriceInt`：验证命中 `peak` 时取 `TierPrices.peak`、未命中时 fallback 到 `Prices`、tier 中未配置某键时 fallback 到默认价格。
 
 2. **Lua 脚本测试**
    - 单 Key 定点数方案：验证扣减、余额归零、负数不溢出。
@@ -790,6 +983,8 @@ return {yuan, frac}
    - 测试流式（SSE）场景：请求体带 `stream: true`，后端返回 SSE 并在最后一个 chunk 中携带 `usage`，验证 RMB 配额仍能正确扣减。
    - 测试 cache/audio 子项计费场景：后端返回 `usage.cache_read_tokens`、`usage.cache_write_tokens`、`usage.audio_input_tokens`、`usage.audio_output_tokens`，验证成本按各子项价格拆分计算；
    - 测试图像生成按次计费场景：请求 `/v1/images/generations`，`ModelTable` 配置 `output_cost_per_image`，后端返回 `usage.image_count`，验证 RMB 配额按 `image_count × output_cost_per_image` 扣减，且 `total_token` 配额按 `image_count` 扣减。
+   - 测试分时段计费场景：`ModelTable` 配置 `Tiers` 与 `TierPrices`；分别在北京时间高峰时段（如周一 10:00）与非高峰时段（如周一 13:00 或周六 10:00）发起请求，验证 Redis 扣减金额分别按 `TierPrices.peak` 与默认 `Prices` 计算。
+   - 测试分时段 + cache 命中组合场景：高峰时段且后端返回 `usage.cache_read_tokens`，验证缓存命中部分按 `TierPrices.peak.cache_read_input_token_cost` 计费，未命中部分按 `TierPrices.peak.input_cost_per_token` 计费。
 
 ## 11. 兼容性与注意事项
 
@@ -803,3 +998,4 @@ return {yuan, frac}
 5. **流式响应计费**：RMB 成本在请求结束阶段计算，依赖 `mod_body_process`（或其他响应处理模块）在流式传输过程中填充 `PromptTokens` / `CompletionTokens` / `CacheReadTokens` / `CacheWriteTokens` / `AudioInputTokens` / `AudioOutputTokens` / `ImageCount`。生产环境若启用流式计费，需确保 `mod_body_process` 已加载。
 6. **模块顺序建议**：`mod_ai_token_auth` 的 `HandleReadResponse` 不再负责 RMB 成本计算，因此对模块加载顺序的敏感度降低；但仍建议保持 `mod_ai_token_auth` 在 `mod_body_process` 之前注册，以便非流式场景下 token 用量解析逻辑保持一致。
 7. **旧字段清理**：`AIConf.Key` 已移除，统一使用 `AIConf.Keys`。
+8. **分时段计费向后兼容**：`ModelTable.Tiers` / `ModelPrice.TierPrices` 均为可选字段；未配置时行为与固定价格完全一致。命中 tier 但该 tier 未配置某个价格键时，自动 fallback 到默认 `Prices`。

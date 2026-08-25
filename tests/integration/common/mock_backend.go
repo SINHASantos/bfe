@@ -57,7 +57,7 @@ type MockBackend struct {
 	// request to determine the response status and body.
 	ResponseFunc func(r *http.Request, count int) (int, string)
 	// ResponseHeaders, if non-nil, is written to the response before the status code.
-	ResponseHeaders map[string]string
+	ResponseHeaders   map[string]string
 	hits              int
 	mu                sync.Mutex
 	models            []string
