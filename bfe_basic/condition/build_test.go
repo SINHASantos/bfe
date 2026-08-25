@@ -171,6 +171,50 @@ var buildPrimitiveTests = []struct {
 		false,
 	},
 	{
+		"testBuildReqBodyLargerThan",
+		`req_body_larger_than(8192)`,
+		&PrimitiveCond{
+			name:    "req_body_larger_than",
+			fetcher: &ContentLengthFetcher{},
+			matcher: &GtInt64Matcher{threshold: 8192},
+		},
+		false,
+	},
+	{
+		"testBuildReqBodyLessThan",
+		`req_body_less_than(2048)`,
+		&PrimitiveCond{
+			name:    "req_body_less_than",
+			fetcher: &ContentLengthFetcher{},
+			matcher: &LtInt64Matcher{threshold: 2048},
+		},
+		false,
+	},
+	{
+		"testBuildReqBodyLargerThanInvalid",
+		`req_body_larger_than("abc")`,
+		nil,
+		true,
+	},
+	{
+		"testBuildReqBodyLargerThanNegative",
+		`req_body_larger_than(-1)`,
+		nil,
+		true,
+	},
+	{
+		"testBuildReqBodyLessThanInvalid",
+		`req_body_less_than("abc")`,
+		nil,
+		true,
+	},
+	{
+		"testBuildReqBodyLessThanNegative",
+		`req_body_less_than(-1)`,
+		nil,
+		true,
+	},
+	{
 		"testBuildUrlRegMatch",
 		"req_url_regmatch(\"123\")",
 		&PrimitiveCond{
@@ -435,6 +479,62 @@ func TestBuildTlsClientCAIn(t *testing.T) {
 	req.Session = &bfe_basic.Session{TlsState: &bfe_tls.ConnectionState{ClientAuth: false, ClientCAName: "clientCa"}, IsSecure: true}
 	if buildTlsClientCAIn.Match(&req) {
 		t.Errorf("ca match ses_tls_client_ca_in(\"clientCa\")")
+	}
+}
+
+func TestBuildReqBodyLargerThanMatch(t *testing.T) {
+	cond, err := Build(`req_body_larger_than(100)`)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	req.HttpRequest.Header = make(map[string][]string)
+	req.HttpRequest.Header.Set("Content-Length", "101")
+	if !cond.Match(&req) {
+		t.Errorf("Content-Length 101 should match req_body_larger_than(100)")
+	}
+
+	req.HttpRequest.Header.Set("Content-Length", "100")
+	if cond.Match(&req) {
+		t.Errorf("Content-Length 100 should not match req_body_larger_than(100)")
+	}
+
+	req.HttpRequest.Header.Set("Content-Length", "99")
+	if cond.Match(&req) {
+		t.Errorf("Content-Length 99 should not match req_body_larger_than(100)")
+	}
+
+	req.HttpRequest.Header.Del("Content-Length")
+	if cond.Match(&req) {
+		t.Errorf("missing Content-Length should not match req_body_larger_than(100)")
+	}
+}
+
+func TestBuildReqBodyLessThanMatch(t *testing.T) {
+	cond, err := Build(`req_body_less_than(100)`)
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	req.HttpRequest.Header = make(map[string][]string)
+	req.HttpRequest.Header.Set("Content-Length", "99")
+	if !cond.Match(&req) {
+		t.Errorf("Content-Length 99 should match req_body_less_than(100)")
+	}
+
+	req.HttpRequest.Header.Set("Content-Length", "100")
+	if cond.Match(&req) {
+		t.Errorf("Content-Length 100 should not match req_body_less_than(100)")
+	}
+
+	req.HttpRequest.Header.Set("Content-Length", "101")
+	if cond.Match(&req) {
+		t.Errorf("Content-Length 101 should not match req_body_less_than(100)")
+	}
+
+	req.HttpRequest.Header.Del("Content-Length")
+	if cond.Match(&req) {
+		t.Errorf("missing Content-Length should not match req_body_less_than(100)")
 	}
 }
 

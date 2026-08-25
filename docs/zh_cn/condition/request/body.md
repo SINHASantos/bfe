@@ -40,3 +40,45 @@ req_body_json_prefix_in("model", "openrouter/anthropic/", false)
 // 命中所有 gpt- 或 claude- 开头的模型（大小写不敏感）
 req_body_json_prefix_in("model", "gpt-|claude-", true)
 ```
+
+## req_body_larger_than(size)
+
+* 含义： 判断请求头 `Content-Length` 的值是否严格大于 `size`（单位：字节）
+* 参数
+
+| 参数     | 描述                   |
+| -------- | ---------------------- |
+| size | Integer<br>字节数阈值 |
+
+* 说明
+  * 数据来源于 HTTP 请求头 `Content-Length`，反映的是整个 HTTP body 的字节数，不是纯 prompt 文本长度；
+  * 若请求没有 `Content-Length` 头（如 chunked 请求），该原语返回 `false`；
+  * 配置阈值时建议通过实际请求采样校准，预留 JSON 结构本身的固定开销。
+
+* 示例
+
+```go
+// 请求体大于 8KB 时命中
+req_body_larger_than(8192)
+```
+
+## req_body_less_than(size)
+
+* 含义： 判断请求头 `Content-Length` 的值是否严格小于 `size`（单位：字节）
+* 参数
+
+| 参数     | 描述                   |
+| -------- | ---------------------- |
+| size | Integer<br>字节数阈值 |
+
+* 说明
+  * 数据来源于 HTTP 请求头 `Content-Length`，反映的是整个 HTTP body 的字节数，不是纯 prompt 文本长度；
+  * 若请求没有 `Content-Length` 头（如 chunked 请求），该原语返回 `false`；
+  * 配置阈值时建议通过实际请求采样校准，预留 JSON 结构本身的固定开销。
+
+* 示例
+
+```go
+// 请求体小于 2KB 时命中
+req_body_less_than(2048)
+```

@@ -90,6 +90,8 @@
 
  * [req_body_json_in(json_path, value_list, case_insensitive)](./request/body.md#req_body_json_injson_path-value_list-case_insensitive)
  * [req_body_json_prefix_in(json_path, value_prefix_list, case_insensitive)](./request/body.md#req_body_json_prefix_injson_path-value_prefix_list-case_insensitive)
+ * [req_body_larger_than(size)](./request/body.md#req_body_larger_thansize)
+ * [req_body_less_than(size)](./request/body.md#req_body_less_thansize)
 
 ## 响应相关
 
