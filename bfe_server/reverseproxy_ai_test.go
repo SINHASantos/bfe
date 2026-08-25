@@ -279,3 +279,105 @@ func TestStripProviderPrefixEmptyResult(t *testing.T) {
 		t.Errorf("expected model unchanged, got %s", stripped)
 	}
 }
+
+func TestComputeTargetModelNoOverride(t *testing.T) {
+	model := computeTargetModel("gpt-4", "", nil)
+	if model != "gpt-4" {
+		t.Errorf("expected gpt-4, got %s", model)
+	}
+}
+
+func TestComputeTargetModelAttemptOverride(t *testing.T) {
+	model := computeTargetModel("gpt-4", "gpt-3.5", nil)
+	if model != "gpt-3.5" {
+		t.Errorf("expected gpt-3.5, got %s", model)
+	}
+}
+
+func TestComputeTargetModelStripPrefix(t *testing.T) {
+	aiConf := &cluster_conf.AIConf{
+		MatchPrefix: "openrouter/",
+		StripPrefix: true,
+	}
+	model := computeTargetModel("openrouter/modelA", "", aiConf)
+	if model != "modelA" {
+		t.Errorf("expected modelA, got %s", model)
+	}
+}
+
+func TestComputeTargetModelStripPrefixAfterOverride(t *testing.T) {
+	aiConf := &cluster_conf.AIConf{
+		MatchPrefix: "openrouter/",
+		StripPrefix: true,
+	}
+	model := computeTargetModel("clientprefix/mymodel", "openrouter/modelA", aiConf)
+	if model != "modelA" {
+		t.Errorf("expected modelA, got %s", model)
+	}
+}
+
+func TestComputeTargetModelModelMapping(t *testing.T) {
+	mappings := map[string]string{"modelA": "mapped-model"}
+	aiConf := &cluster_conf.AIConf{
+		ModelMapping: &mappings,
+	}
+	model := computeTargetModel("modelA", "", aiConf)
+	if model != "mapped-model" {
+		t.Errorf("expected mapped-model, got %s", model)
+	}
+}
+
+func TestComputeTargetModelFullChain(t *testing.T) {
+	mappings := map[string]string{"modelA": "mapped-model"}
+	aiConf := &cluster_conf.AIConf{
+		MatchPrefix:  "openrouter/",
+		StripPrefix:  true,
+		ModelMapping: &mappings,
+	}
+	model := computeTargetModel("clientprefix/original", "openrouter/modelA", aiConf)
+	if model != "mapped-model" {
+		t.Errorf("expected mapped-model, got %s", model)
+	}
+}
+
+func TestComputeTargetModelFallbackRecompute(t *testing.T) {
+	// Simulates fallback scenario: primary cluster mapped clientprefix/mymodel
+	// to mapped-primary-model; fallback cluster should recompute from ClientModel.
+	primaryMappings := map[string]string{"modelA": "mapped-primary-model"}
+	primaryConf := &cluster_conf.AIConf{
+		MatchPrefix:  "openrouter/",
+		StripPrefix:  true,
+		ModelMapping: &primaryMappings,
+	}
+	primaryModel := computeTargetModel("clientprefix/mymodel", "openrouter/modelA", primaryConf)
+	if primaryModel != "mapped-primary-model" {
+		t.Errorf("expected mapped-primary-model, got %s", primaryModel)
+	}
+
+	fallbackModel := computeTargetModel("clientprefix/mymodel", "", nil)
+	if fallbackModel != "clientprefix/mymodel" {
+		t.Errorf("expected fallback to recompute from ClientModel, got %s", fallbackModel)
+	}
+}
+
+func TestComputeTargetModelStripPrefixNoMatch(t *testing.T) {
+	aiConf := &cluster_conf.AIConf{
+		MatchPrefix: "openrouter/",
+		StripPrefix: true,
+	}
+	model := computeTargetModel("anthropic/claude", "", aiConf)
+	if model != "anthropic/claude" {
+		t.Errorf("expected anthropic/claude unchanged, got %s", model)
+	}
+}
+
+func TestComputeTargetModelMappingNoMatch(t *testing.T) {
+	mappings := map[string]string{"modelA": "mapped-model"}
+	aiConf := &cluster_conf.AIConf{
+		ModelMapping: &mappings,
+	}
+	model := computeTargetModel("modelB", "", aiConf)
+	if model != "modelB" {
+		t.Errorf("expected modelB unchanged, got %s", model)
+	}
+}

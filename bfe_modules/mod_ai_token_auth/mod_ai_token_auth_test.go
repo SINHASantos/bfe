@@ -1433,6 +1433,11 @@ func (m *mockRedisClient) IncrBy(key string, delta int64) (int64, error) {
 	return m.data[key], nil
 }
 
+func (m *mockRedisClient) Delete(key string) error {
+	delete(m.data, key)
+	return nil
+}
+
 func (m *mockRedisClient) NewScript(src string) redis_client.RedisScript {
 	return &mockRedisScript{client: m, src: src}
 }
