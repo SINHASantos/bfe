@@ -1173,6 +1173,52 @@ func HttpRespBodyJsonGet(res *bfe_http.Response, path string) (string, error) {
 	return val.String(), nil
 }
 
+// ContentLengthFetcher fetches Content-Length from request header.
+type ContentLengthFetcher struct{}
+
+func (f *ContentLengthFetcher) Fetch(req *bfe_basic.Request) (interface{}, error) {
+	if req == nil || req.HttpRequest == nil {
+		return nil, fmt.Errorf("fetcher: nil pointer")
+	}
+
+	cl := req.HttpRequest.Header.Get("Content-Length")
+	if cl == "" {
+		return nil, fmt.Errorf("fetcher: Content-Length absent")
+	}
+
+	n, err := strconv.ParseInt(cl, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("fetcher: invalid Content-Length %s", cl)
+	}
+	return n, nil
+}
+
+// GtInt64Matcher matches when value > threshold.
+type GtInt64Matcher struct {
+	threshold int64
+}
+
+func (m *GtInt64Matcher) Match(v interface{}) bool {
+	n, ok := v.(int64)
+	if !ok {
+		return false
+	}
+	return n > m.threshold
+}
+
+// LtInt64Matcher matches when value < threshold.
+type LtInt64Matcher struct {
+	threshold int64
+}
+
+func (m *LtInt64Matcher) Match(v interface{}) bool {
+	n, ok := v.(int64)
+	if !ok {
+		return false
+	}
+	return n < m.threshold
+}
+
 func ReqBodyJsonSet(req *bfe_basic.Request, path string, value string) error {
 	if req == nil || req.OutRequest == nil {
 		return fmt.Errorf("set json body error: nil pointer")

@@ -17,6 +17,7 @@ package condition
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -411,6 +412,71 @@ func TestReqBodyJsonPrefixInMulti(t *testing.T) {
 		if matched := cond.Match(req); matched != c.matched {
 			t.Errorf("body %s matched=%v, want=%v", c.body, matched, c.matched)
 		}
+	}
+}
+
+func TestContentLengthFetcher(t *testing.T) {
+	body := `{"model":"gpt-4"}`
+	httpReq, _ := bfe_http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(body))
+	httpReq.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	req := bfe_basic.NewRequest(httpReq, nil, nil, &bfe_basic.Session{}, nil)
+
+	f := &ContentLengthFetcher{}
+	v, err := f.Fetch(req)
+	if err != nil {
+		t.Fatalf("Fetch() error: %v", err)
+	}
+	if v.(int64) != int64(len(body)) {
+		t.Errorf("Content-Length mismatch, want=%d, got=%d", len(body), v.(int64))
+	}
+
+	// missing Content-Length
+	httpReq2, _ := bfe_http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(`body`))
+	req2 := bfe_basic.NewRequest(httpReq2, nil, nil, &bfe_basic.Session{}, nil)
+	_, err = f.Fetch(req2)
+	if err == nil {
+		t.Errorf("missing Content-Length should return error")
+	}
+
+	// invalid Content-Length
+	httpReq3, _ := bfe_http.NewRequest("POST", "http://example.com/v1/chat/completions", strings.NewReader(`body`))
+	httpReq3.Header.Set("Content-Length", "abc")
+	req3 := bfe_basic.NewRequest(httpReq3, nil, nil, &bfe_basic.Session{}, nil)
+	_, err = f.Fetch(req3)
+	if err == nil {
+		t.Errorf("invalid Content-Length should return error")
+	}
+}
+
+func TestGtInt64Matcher(t *testing.T) {
+	m := &GtInt64Matcher{threshold: 100}
+	if !m.Match(int64(101)) {
+		t.Errorf("101 should match >100")
+	}
+	if m.Match(int64(100)) {
+		t.Errorf("100 should not match >100")
+	}
+	if m.Match(int64(99)) {
+		t.Errorf("99 should not match >100")
+	}
+	if m.Match("abc") {
+		t.Errorf("string should not match GtInt64Matcher")
+	}
+}
+
+func TestLtInt64Matcher(t *testing.T) {
+	m := &LtInt64Matcher{threshold: 100}
+	if !m.Match(int64(99)) {
+		t.Errorf("99 should match <100")
+	}
+	if m.Match(int64(100)) {
+		t.Errorf("100 should not match <100")
+	}
+	if m.Match(int64(101)) {
+		t.Errorf("101 should not match <100")
+	}
+	if m.Match("abc") {
+		t.Errorf("string should not match LtInt64Matcher")
 	}
 }
 
