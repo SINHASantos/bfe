@@ -1,144 +1,352 @@
 # 集群转发配置
 
-## 配置简介
+## 1. 配置简介
 
-cluster_conf.data为集群转发配置文件。
+`cluster_conf.data` 是 BFE 的集群转发配置文件，用于声明各集群的后端、健康检查、负载均衡、AI 服务接入等参数。
 
-## 配置描述
+---
 
-### 基础配置
+## 2. 顶层结构
 
-| 配置项     | 类型   | 参数含义                 | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ---------- | ------ | ------------------------ | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| Version    | String | 配置文件版本             | Y    | 参见 [Version](../00-common.md#5-配置文件版本version) 类型定义  | 类型为 [Version](../00-common.md#5-配置文件版本version)         |
-| Config     | Object | 各集群的转发配置参数     | Y    | 键为集群名称，值为集群转发配置参数                           | 非空                                                         |
-| Config[k]  | String | 集群名称                 | Y    | 作为 Config 的键                                             | 非空                                                         |
-| Config[v]  | Object | 集群转发配置参数         | Y    | 包含 BackendConf、CheckConf、GslbBasic、ClusterBasic、HTTPSConf、AIConf 等 | 非空                                                         |
+```json
+{
+    "Version": "20190101000000",
+    "Config": { /* 集群名称 -> 集群转发配置 */ }
+}
+```
 
-### 集群转发配置
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Version | string | Y | 配置文件版本，通常采用时间戳格式 | 参见 [Version](../00-common.md#5-配置文件版本version) |
+| Config | object | Y | 各集群的转发配置参数；键为集群名称，值为集群转发配置 | 非空 |
 
-注：以下配置项均位于名字空间Config[v], 在配置项名称中已省略
+---
 
-#### 后端基础配置
+## 3. 集群转发配置
 
-| 配置项                              | 类型           | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ----------------------------------- | -------------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| BackendConf.Protocol                | String         | 后端服务的协议                                 | N    | 默认值`http`                                                 | 仅支持 `http`、`https`、`fcgi`、`tcp`、`ws`、`h2c`          |
-| BackendConf.TimeoutConnSrv          | Integer        | 连接后端的超时时间，单位是毫秒                 | N    | 默认值2000                                                   | >= 0                                                         |
-| BackendConf.TimeoutResponseHeader   | Integer        | 从后端读响应头的超时时间，单位是毫秒           | N    | 默认值60000                                                  | >= 0                                                         |
-| BackendConf.MaxIdleConnsPerHost     | Integer        | BFE实例与每个后端的最大空闲长连接数            | N    | 默认值2                                                      | >= 0                                                         |
-| BackendConf.MaxConnsPerHost         | Integer        | BFE实例与每个后端的最大长连接数                | N    | 默认值0；0代表无限制                                         | >= 0                                                         |
-| BackendConf.SlowStartTime           | Integer        | 后端实例慢启动时间，单位为秒                   | N    | 默认值0；0表示不开启慢启动                                   | >= 0                                                         |
-| BackendConf.RetryLevel              | Integer        | 请求重试级别                                   | N    | 默认值0；0：连接后端失败时重试；1：连接后端失败、转发GET请求失败时均重试 | 仅支持 0 或 1                                                |
-| BackendConf.OutlierDetectionHttpCode | String        | 后端响应状态码异常检查                         | N    | 默认值 `""`，表示不开启检查；`"500"` 表示后端返回500则认为后端失败 | 类型为 [HTTPStatusCodePattern](../00-common.md#9-http-状态码模式httpstatuscodepattern)；为空字符串表示不开启 |
-| BackendConf.FCGIConf                | Object         | FastCGI 协议的配置                             | N    | 仅当 Protocol 为 `fcgi` 时生效                               | -                                                            |
-| BackendConf.FCGIConf.Root           | String         | 网站的Root文件夹位置                           | 条件 | FCGIConf 配置时必填                                          | 非空                                                         |
-| BackendConf.FCGIConf.EnvVars        | Map[string]string | 拓展的环境变量                              | N    | 自定义 FastCGI 环境变量                                      | -                                                            |
+以下配置项均位于 `Config[<cluster_name>]` 名字空间下。
 
-#### 健康检查配置
+```json
+{
+    "BackendConf": { /* 后端基础配置 */ },
+    "CheckConf": { /* 健康检查配置 */ },
+    "GslbBasic": { /* GSLB 基础配置 */ },
+    "ClusterBasic": { /* 集群基础配置 */ },
+    "HTTPSConf": { /* 后端 HTTPS 配置，可选 */ },
+    "AIConf": { /* AI 服务配置，可选 */ }
+}
+```
 
-| 配置项                        | 类型    | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ----------------------------- | ------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| CheckConf.Schem               | String  | 健康检查协议                                   | N    | 默认值 `HTTP`                                                | 仅支持 `HTTP`、`HTTPS`、`TCP`、`TLS`                         |
-| CheckConf.HostType            | String  | 健康检查请求Host类型                           | N    | 默认值 `HOST`；`HOST` 使用 CheckConf.Host，`ADDR` 使用后端实例地址 | 仅支持 `HOST`、`ADDR`                                        |
-| CheckConf.Uri                 | String  | 健康检查请求URI                                | N    | 默认值 `"/health_check"`                                     | -                                                            |
-| CheckConf.Host                | String  | 健康检查请求HOST                               | N    | 默认值 `""`                                                  | -                                                            |
-| CheckConf.StatusCode          | Integer | 期待返回的响应状态码                           | N    | 默认值 0，代表任意状态码均符合预期；也可配置为具体状态码如 200 | >= 0                                                         |
-| CheckConf.StatusCodeRange     | String  | 期待返回的响应状态码范围                       | N    | 具体参见注解「1. StatusCodeRange」                           | 类型为 [HTTPStatusCodePattern](../00-common.md#9-http-状态码模式httpstatuscodepattern) |
-| CheckConf.FailNum             | Integer | 健康检查启动阈值                               | N    | 转发请求连续失败 FailNum 次后，将后端实例置为不可用状态，并启动健康检查；默认值5 | > 0                                                          |
-| CheckConf.SuccNum             | Integer | 健康检查成功阈值                               | N    | 健康检查连续成功 SuccNum 次后，将后端实例置为可用状态；默认值1 | > 0                                                          |
-| CheckConf.CheckTimeout        | Integer | 健康检查的超时时间，单位是毫秒                 | N    | 默认值0，表示无超时                                          | >= 0                                                         |
-| CheckConf.CheckInterval       | Integer | 健康检查的间隔时间，单位是毫秒                 | N    | 默认值1000                                                   | > 0                                                          |
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| BackendConf | object | N | 后端基础配置 |
+| CheckConf | object | N | 健康检查配置 |
+| GslbBasic | object | N | GSLB 基础配置 |
+| ClusterBasic | object | N | 集群基础配置 |
+| HTTPSConf | object | N | 后端服务 HTTPS 配置；仅当 `BackendConf.Protocol` 为 `https` 时生效 |
+| AIConf | object | N | AI 服务配置；用于大模型转发、API-Key 选择、模型定价等 |
 
-#### GSLB基础配置
+---
 
-| 配置项                              | 类型      | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ----------------------------------- | --------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| GslbBasic.CrossRetry                | Integer   | 跨子集群最大重试次数                           | N    | 默认值0                                                      | >= 0                                                         |
-| GslbBasic.RetryMax                  | Integer   | 子集群内最大重试次数                           | N    | 默认值2                                                      | >= 0                                                         |
-| GslbBasic.BalanceMode               | String    | 负载均衡模式                                   | N    | 默认值`WRR`                                                  | 仅支持 `WRR`（加权轮询）、`WLC`（加权最小连接数）、`EPP`（基于外部策略的负载均衡） |
-| GslbBasic.EPPAddr                   | []String  | EPP服务端地址列表                              | 条件 | 仅当 BalanceMode 为 `EPP` 时生效                             | 非空列表；每个元素为有效地址                                 |
-| GslbBasic.HashConf                  | Object    | 会话保持的HASH策略配置                         | N    | -                                                            | -                                                            |
-| GslbBasic.HashConf.HashStrategy     | Integer   | 会话保持的哈希策略                             | N    | 默认值为1（ClientIpOnly）                                    | 仅支持 0（ClientIdOnly）、1（ClientIpOnly）、2（ClientIdPreferred）、3（RequestURI） |
-| GslbBasic.HashConf.HashHeader       | String    | 会话保持的hash请求头                           | N    | 可选参数；可配置为能用于唯一区分一个客户端的Header；Cookie header 格式为 `"Cookie:key"` | -                                                            |
-| GslbBasic.HashConf.SessionSticky    | Boolean   | 是否开启会话保持                               | N    | 默认值`False`；设为 `False` 时，会话保持级别为子集群级别     | -                                                            |
+## 4. 后端基础配置
 
-#### 集群基础配置
+```json
+{
+    "BackendConf": {
+        "Protocol": "http",
+        "TimeoutConnSrv": 2000,
+        "TimeoutResponseHeader": 60000,
+        "MaxIdleConnsPerHost": 2,
+        "MaxConnsPerHost": 0,
+        "SlowStartTime": 0,
+        "RetryLevel": 0,
+        "OutlierDetectionHttpCode": "",
+        "FCGIConf": { /* 仅 Protocol=fcgi 时生效 */ }
+    }
+}
+```
 
-| 配置项                                  | 类型    | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| --------------------------------------- | ------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| ClusterBasic.TimeoutReadClient          | Integer | 读用户请求body的超时时间，单位为毫秒           | N    | 默认值30000                                                  | >= 0                                                         |
-| ClusterBasic.TimeoutWriteClient         | Integer | 写响应的超时时间，单位为毫秒                   | N    | 默认值60000                                                  | >= 0                                                         |
-| ClusterBasic.TimeoutReadClientAgain     | Integer | 连接闲置超时时间，单位为毫秒                   | N    | 默认值60000                                                  | >= 0                                                         |
-| ClusterBasic.ReqWriteBufferSize         | Integer | 请求的写buffer大小，单位为Bytes                | N    | 默认值512；建议使用默认值                                    | > 0                                                          |
-| ClusterBasic.ReqFlushInterval           | Integer | 刷新请求的间隔时间，单位是毫秒                 | N    | 默认值为0，表示不进行周期性刷新                              | >= 0                                                         |
-| ClusterBasic.ResFlushInterval           | Integer | 刷新响应的间隔时间，单位是毫秒                 | N    | 默认值为-1，表示不对响应进行缓存；设置为0表示不进行周期性刷新；建议使用默认值 | -                                                            |
-| ClusterBasic.CancelOnClientClose        | Boolean | 当服务端正在读后端响应时，如果客户端断连，是否取消该阻塞状态 | N    | 默认值为`false`；建议使用默认值                              | -                                                            |
-| ClusterBasic.DisableHostHeader          | Boolean | 是否禁用由BFE自动添加/覆盖的Host请求头         | N    | 默认值为`false`                                              | -                                                            |
-| ClusterBasic.DisableHealthCheck         | Boolean | 是否禁用该集群的健康检查                       | N    | 默认值为`false`                                              | -                                                            |
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Protocol | string | N | 后端服务的协议；默认 `http` | 仅支持 `http`、`https`、`fcgi`、`tcp`、`ws`、`h2c` |
+| TimeoutConnSrv | integer | N | 连接后端的超时时间，单位毫秒；默认 `2000` | >= 0 |
+| TimeoutResponseHeader | integer | N | 从后端读响应头的超时时间，单位毫秒；默认 `60000` | >= 0 |
+| MaxIdleConnsPerHost | integer | N | BFE 实例与每个后端的最大空闲长连接数；默认 `2` | >= 0 |
+| MaxConnsPerHost | integer | N | BFE 实例与每个后端的最大长连接数；默认 `0`，表示无限制 | >= 0 |
+| SlowStartTime | integer | N | 后端实例慢启动时间，单位秒；默认 `0`，表示不开启 | >= 0 |
+| RetryLevel | integer | N | 请求重试级别；默认 `0` | `0`：连接后端失败时重试；`1`：连接后端失败、转发 GET 请求失败时均重试 |
+| OutlierDetectionHttpCode | string | N | 后端响应状态码异常检查；默认 `""`，表示不开启 | 类型为 [HTTPStatusCodePattern](../00-common.md#9-http-状态码模式httpstatuscodepattern) |
+| FCGIConf | object | N | FastCGI 协议的配置；仅当 `Protocol` 为 `fcgi` 时生效 | - |
+| FCGIConf.Root | string | 条件 | FastCGI Root 文件夹位置；`FCGIConf` 配置时必填 | 非空 |
+| FCGIConf.EnvVars | map[string]string | N | 自定义 FastCGI 环境变量 | - |
 
-#### 后端服务HTTPS配置
+---
 
-| 配置项                             | 类型      | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ---------------------------------- | --------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| HTTPSConf.RSHost                   | String    | 后端服务实例的hostname                         | N    | 用来验证服务端证书；无默认值，需显式配置                     | 非空；须为有效主机名                                         |
-| HTTPSConf.BFEKeyFile               | String    | 私钥文件路径                                   | 条件 | 支持双向认证时必填；BFE引擎向后端转发https请求时使用的私钥；须为pem格式 | 类型为 [FilePath](../00-common.md#3-文件路径filepath)；`RSInsecureSkipVerify=false` 且需要双向认证时必填 |
-| HTTPSConf.BFECertFile              | String    | 证书文件路径                                   | 条件 | 支持双向认证时必填；须为符合x509标准的pem格式，每个pem文件只能包含一张证书 | 类型为 [FilePath](../00-common.md#3-文件路径filepath)；`RSInsecureSkipVerify=false` 且需要双向认证时必填 |
-| HTTPSConf.RSCAList                 | []String  | 后端服务端证书CA列表                           | 条件 | `BackendConf.Protocol` 为 `https` 且需要验证服务端证书时必填；不填则使用系统默认CA池 | 每个元素类型为 [FilePath](../00-common.md#3-文件路径filepath)；须为符合x509标准的pem格式证书 |
-| HTTPSConf.RSInsecureSkipVerify     | Boolean   | 服务端证书验证开关                             | N    | 默认值为`false`                                              | -                                                            |
+## 5. 健康检查配置
 
-#### AI服务配置
+```json
+{
+    "CheckConf": {
+        "Schem": "HTTP",
+        "HostType": "HOST",
+        "Uri": "/health_check",
+        "Host": "",
+        "StatusCode": 0,
+        "StatusCodeRange": "",
+        "FailNum": 5,
+        "SuccNum": 1,
+        "CheckTimeout": 0,
+        "CheckInterval": 1000
+    }
+}
+```
 
-| 配置项                              | 类型              | 参数含义                                       | 必填 | 补充描述                                                     | 合法性条件                                                   |
-| ----------------------------------- | ----------------- | ---------------------------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| AIConf.Type                         | Integer           | AI服务类型                                     | N    | 当前保留字段，请保持为0                                      | 仅支持 0                                                     |
-| AIConf.Provider                     | String            | 该集群在 model_prices 中对应的 provider 名称   | N    | 由 ai-gateway-api 根据 OpenAPI `llm_config.provider` 自动填充；用于成本统计 | -                                                            |
-| AIConf.Keys                         | []Object          | 后端大模型服务的 API-Key 列表                  | N    | 为空数组表示访问后端服务时不注入 API-Key，仍保持请求的 API-Key；按权重加权随机选择 | 元素见下表「AIConf.Keys 元素」                               |
-| AIConf.KeyPolicy                    | Object            | API-Key 选择策略与重试退避配置                 | N    | 多 Key 场景下生效；单 Key 或无 Key 时退避逻辑不生效          | 元素见下表「AIConf.KeyPolicy 元素」                          |
-| AIConf.ModelMapping                 | Map[string]string | 原请求model -> 后端服务的model 的映射关系      | N    | 访问后端服务时将根据请求的 model 字段查找此映射关系，命中则重写请求的 model 字段 | 键值均非空                                                   |
-| AIConf.MatchPrefix                  | String            | 需要匹配的 provider/model 前缀                 | N    | 例如 `openrouter/`；必须以 `/` 结尾；用于 OpenRouter 等聚合 provider 场景 | `StripPrefix=true` 时必填                                    |
-| AIConf.StripPrefix                  | Boolean           | 是否裁剪 `MatchPrefix` 指定前缀                | N    | `true` 时转发给下游前会从请求 model 字段中去掉该前缀；`false` 时仅用于路由标识，不裁剪 | 默认 `false`                                                 |
-| AIConf.ModelProtocols               | []String          | 该集群 provider 支持的模型访问协议列表         | N    | 例如 `["openai"]`、`["anthropic"]`、`["openai", "anthropic"]`；为空时默认仅支持 `openai` | 元素取值须为 `openai` 或 `anthropic`                         |
-| AIConf.ModelTable                   | Object            | 该集群的模型定价表                             | N    | 由 ai-gateway-api 根据 `Provider` 查询 model_prices 自动填充；当前货币固定为 RMB | 元素见下表「AIConf.ModelTable 元素」                         |
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Schem | string | N | 健康检查协议；默认 `HTTP` | 仅支持 `HTTP`、`HTTPS`、`TCP`、`TLS` |
+| HostType | string | N | 健康检查请求 Host 类型；默认 `HOST` | `HOST` 使用 `CheckConf.Host`；`ADDR` 使用后端实例地址 |
+| Uri | string | N | 健康检查请求 URI；默认 `"/health_check"` | - |
+| Host | string | N | 健康检查请求 HOST；默认 `""` | - |
+| StatusCode | integer | N | 期待返回的响应状态码；默认 `0`，表示任意状态码均符合预期 | >= 0 |
+| StatusCodeRange | string | N | 期待返回的响应状态码范围 | 类型为 [HTTPStatusCodePattern](../00-common.md#9-http-状态码模式httpstatuscodepattern) |
+| FailNum | integer | N | 转发请求连续失败 `FailNum` 次后，将后端置为不可用并启动健康检查；默认 `5` | > 0 |
+| SuccNum | integer | N | 健康检查连续成功 `SuccNum` 次后，将后端置为可用；默认 `1` | > 0 |
+| CheckTimeout | integer | N | 健康检查的超时时间，单位毫秒；默认 `0`，表示无超时 | >= 0 |
+| CheckInterval | integer | N | 健康检查的间隔时间，单位毫秒；默认 `1000` | > 0 |
 
-##### AIConf.Keys 元素
+---
 
-| 配置项              | 类型    | 参数含义           | 必填 | 补充描述                                         | 合法性条件 |
-| ------------------- | ------- | ------------------ | ---- | ------------------------------------------------ | ---------- |
-| AIConf.Keys[i].Name | String  | API-Key 名称/标识  | Y    | 用于日志、监控、运维识别                         | 非空       |
-| AIConf.Keys[i].Key  | String  | API-Key 值         | Y    | 实际用于后端认证的密钥                           | 非空       |
-| AIConf.Keys[i].Weight | Integer | 权重             | Y    | 用于加权随机选择；范围为 `[0,100]`；`0` 表示不接收流量 | `[0,100]`；多 Key 时权重总和须为 100 |
+## 6. GSLB 基础配置
 
-##### AIConf.KeyPolicy 元素
+```json
+{
+    "GslbBasic": {
+        "CrossRetry": 0,
+        "RetryMax": 2,
+        "BalanceMode": "WRR",
+        "EPPAddr": [],
+        "HashConf": {
+            "HashStrategy": 1,
+            "HashHeader": "",
+            "SessionSticky": false
+        }
+    }
+}
+```
 
-| 配置项                                | 类型    | 参数含义             | 必填 | 补充描述                                                     | 合法性条件                       |
-| ------------------------------------- | ------- | -------------------- | ---- | ------------------------------------------------------------ | -------------------------------- |
-| AIConf.KeyPolicy.Strategy             | String  | Key 选择策略         | N    | 当前仅支持 `weighted_random`                                 | 仅支持 `weighted_random`         |
-| AIConf.KeyPolicy.MaxRetries           | Integer | 总额外重试次数       | N    | 一次 `aiClusterInvoke` 调用内，除首次选择外的最大重试次数；`0` 表示不重试 | >= 0                             |
-| AIConf.KeyPolicy.RetryBackoffInitial  | Integer | 初始退避时间，单位毫秒 | N    | 首次重试的退避时间                                           | >= 0                             |
-| AIConf.KeyPolicy.RetryBackoffMax      | Integer | 最大退避时间，单位毫秒 | N    | 退避时间上限                                                 | >= 0，且须 >= RetryBackoffInitial |
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| CrossRetry | integer | N | 跨子集群最大重试次数；默认 `0` | >= 0 |
+| RetryMax | integer | N | 子集群内最大重试次数；默认 `2` | >= 0 |
+| BalanceMode | string | N | 负载均衡模式；默认 `WRR` | `WRR`（加权轮询）、`WLC`（加权最小连接数）、`EPP`（基于外部策略） |
+| EPPAddr | []string | 条件 | EPP 服务端地址列表；`BalanceMode` 为 `EPP` 时必填 | 非空列表；每个元素为有效地址 |
+| HashConf | object | N | 会话保持的 HASH 策略配置 | - |
+| HashConf.HashStrategy | integer | N | 哈希策略；默认 `1`（ClientIpOnly） | `0` ClientIdOnly；`1` ClientIpOnly；`2` ClientIdPreferred；`3` RequestURI |
+| HashConf.HashHeader | string | N | 会话保持的 hash 请求头；Cookie 格式为 `"Cookie:key"` | - |
+| HashConf.SessionSticky | boolean | N | 是否开启会话保持；默认 `false` | - |
 
-##### AIConf.ModelTable 元素
+---
 
-| 配置项                          | 类型     | 参数含义           | 必填 | 补充描述                            | 合法性条件 |
-| ------------------------------- | -------- | ------------------ | ---- | ----------------------------------- | ---------- |
-| AIConf.ModelTable.Currency      | String   | 货币类型           | Y    | v0.4 固定为 `RMB`                   | -          |
-| AIConf.ModelTable.Models        | []Object | 模型定价条目列表   | Y    | 每个条目对应一个模型及其价格/限制   | 元素见下表「AIConf.ModelTable.Models 元素」 |
+## 7. 集群基础配置
 
-##### AIConf.ModelTable.Models 元素
+```json
+{
+    "ClusterBasic": {
+        "TimeoutReadClient": 30000,
+        "TimeoutWriteClient": 60000,
+        "TimeoutReadClientAgain": 60000,
+        "ReqWriteBufferSize": 512,
+        "ReqFlushInterval": 0,
+        "ResFlushInterval": -1,
+        "CancelOnClientClose": false,
+        "DisableHostHeader": false,
+        "DisableHealthCheck": false
+    }
+}
+```
 
-| 配置项                                         | 类型              | 参数含义           | 必填 | 补充描述                            | 合法性条件 |
-| ---------------------------------------------- | ----------------- | ------------------ | ---- | ----------------------------------- | ---------- |
-| AIConf.ModelTable.Models[i].Provider           | String            | Provider 名        | Y    | -                                   | 非空       |
-| AIConf.ModelTable.Models[i].Model              | String            | 模型名             | Y    | 用于匹配请求中的 target_model       | 非空       |
-| AIConf.ModelTable.Models[i].BaseModel          | String            | 归一化模型名       | Y    | -                                   | 非空       |
-| AIConf.ModelTable.Models[i].Mode               | String            | 请求模式           | N    | 例如 `chat`                         | -          |
-| AIConf.ModelTable.Models[i].Capabilities       | []String          | 能力列表           | N    | 例如 `["chat", "reasoning"]`        | -          |
-| AIConf.ModelTable.Models[i].SupportedParameters| []String          | 支持的请求参数列表 | N    | 例如 `["temperature", "max_tokens"]`| -          |
-| AIConf.ModelTable.Models[i].Limits             | Map[string]Integer| 限制对象           | N    | 例如 `context_window` 等            | -          |
-| AIConf.ModelTable.Models[i].Prices             | Map[string]Number | 价格对象           | N    | 例如 `input_cost_per_token` 等      | -          |
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| TimeoutReadClient | integer | N | 读用户请求 body 的超时时间，单位毫秒；默认 `30000` | >= 0 |
+| TimeoutWriteClient | integer | N | 写响应的超时时间，单位毫秒；默认 `60000` | >= 0 |
+| TimeoutReadClientAgain | integer | N | 连接闲置超时时间，单位毫秒；默认 `60000` | >= 0 |
+| ReqWriteBufferSize | integer | N | 请求的写 buffer 大小，单位 Bytes；默认 `512` | > 0 |
+| ReqFlushInterval | integer | N | 刷新请求的间隔时间，单位毫秒；默认 `0` | >= 0 |
+| ResFlushInterval | integer | N | 刷新响应的间隔时间，单位毫秒；默认 `-1` | - |
+| CancelOnClientClose | boolean | N | 当服务端正在读后端响应时，客户端断连是否取消阻塞；默认 `false` | - |
+| DisableHostHeader | boolean | N | 是否禁用 BFE 自动添加/覆盖的 Host 请求头；默认 `false` | - |
+| DisableHealthCheck | boolean | N | 是否禁用该集群的健康检查；默认 `false` | - |
 
-## 配置示例
+---
+
+## 8. 后端服务 HTTPS 配置
+
+```json
+{
+    "HTTPSConf": {
+        "RSHost": "www.example.org",
+        "BFEKeyFile": "",
+        "BFECertFile": "",
+        "RSCAList": [],
+        "RSInsecureSkipVerify": false
+    }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| RSHost | string | N | 后端服务实例的 hostname；用于验证服务端证书 | 非空；须为有效主机名 |
+| BFEKeyFile | string | 条件 | BFE 向后端转发 HTTPS 请求时使用的私钥文件；双向认证时必填 | 类型为 [FilePath](../00-common.md#3-文件路径filepath) |
+| BFECertFile | string | 条件 | BFE 向后端转发 HTTPS 请求时使用的证书文件；双向认证时必填 | 类型为 [FilePath](../00-common.md#3-文件路径filepath) |
+| RSCAList | []string | 条件 | 后端服务端证书 CA 列表；`BackendConf.Protocol` 为 `https` 且需要验证服务端证书时必填 | 每个元素为有效的 pem 格式证书路径 |
+| RSInsecureSkipVerify | boolean | N | 是否跳过服务端证书验证；默认 `false` | - |
+
+---
+
+## 9. AI 服务配置
+
+`AIConf` 用于声明大模型后端的接入信息、API-Key 策略、模型映射与定价表。通常由 `ai-gateway-api` 自动生成并下发。
+
+```json
+{
+    "AIConf": {
+        "Type": 0,
+        "Provider": "deepseek",
+        "MatchPrefix": "",
+        "StripPrefix": false,
+        "ModelProtocols": ["openai"],
+        "Keys": [ /* AIConf.Keys 元素 */ ],
+        "KeyPolicy": { /* AIConf.KeyPolicy 元素 */ },
+        "ModelMapping": {},
+        "ModelTable": { /* AIConf.ModelTable 元素 */ }
+    }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Type | integer | N | AI 服务类型；当前保留字段，请保持为 `0` | 仅支持 `0` |
+| Provider | string | N | 该集群在 `model_prices` 中对应的 provider 名称；用于成本统计 | - |
+| Keys | []object | N | 后端大模型服务的 API-Key 列表 | 元素见 [9.1 AIConf.Keys 元素](#91-aiconfkeys-元素) |
+| KeyPolicy | object | N | API-Key 选择策略与重试退避配置 | 元素见 [9.2 AIConf.KeyPolicy 元素](#92-aiconfkeypolicy-元素) |
+| ModelMapping | map[string]string | N | 原请求 model -> 后端服务 model 的映射；命中则重写请求 model | 键值均非空 |
+| MatchPrefix | string | N | 需要匹配的 provider/model 前缀；用于 OpenRouter 等聚合 provider 场景 | `StripPrefix=true` 时必填；须以 `/` 结尾 |
+| StripPrefix | boolean | N | 是否裁剪 `MatchPrefix` 指定前缀；默认 `false` | - |
+| ModelProtocols | []string | N | 该集群 provider 支持的模型访问协议列表；为空时默认仅支持 `openai` | 元素取值须为 `openai` 或 `anthropic` |
+| ModelTable | object | N | 该集群的模型定价表；当前货币固定为 `RMB` | 元素见 [9.3 AIConf.ModelTable 元素](#93-aiconfmodeltable-元素) |
+
+### 9.1 AIConf.Keys 元素
+
+```json
+{
+    "Name": "key-primary",
+    "Key": "sk-example-api-key",
+    "Weight": 100
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Name | string | Y | API-Key 名称/标识，用于日志、监控、运维识别 | 非空 |
+| Key | string | Y | 实际用于后端认证的密钥 | 非空 |
+| Weight | integer | Y | 加权随机选择时的权重；`0` 表示不接收流量 | `[0, 100]`；多 Key 时权重总和须为 `100` |
+
+### 9.2 AIConf.KeyPolicy 元素
+
+```json
+{
+    "Strategy": "weighted_random",
+    "MaxRetries": 3,
+    "RetryBackoffInitial": 500,
+    "RetryBackoffMax": 5000
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Strategy | string | N | Key 选择策略；当前仅支持 `weighted_random` | 仅支持 `weighted_random` |
+| MaxRetries | integer | N | 一次 `aiClusterInvoke` 调用内，除首次选择外的最大重试次数；`0` 表示不重试 | >= 0 |
+| RetryBackoffInitial | integer | N | 首次重试的退避时间，单位毫秒 | >= 0 |
+| RetryBackoffMax | integer | N | 最大退避时间，单位毫秒 | >= 0，且须 >= `RetryBackoffInitial` |
+
+### 9.3 AIConf.ModelTable 元素
+
+```json
+{
+    "Currency": "RMB",
+    "TimeZone": "Asia/Shanghai",
+    "Tiers": [ /* AIConf.ModelTable.Tiers 元素 */ ],
+    "Models": [ /* AIConf.ModelTable.Models 元素 */ ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Currency | string | Y | 货币类型；当前固定为 `RMB` | - |
+| TimeZone | string | N | 计算时段所使用的时区；默认 `Asia/Shanghai` | 须为合法 IANA 时区名 |
+| Tiers | []object | N | 时段 tier 定义列表；不填时按固定价格计费 | 元素见 [9.3.1 Tiers 元素](#931-tiers-元素) |
+| Models | []object | Y | 模型定价条目列表 | 元素见 [9.3.2 Models 元素](#932-models-元素) |
+
+#### 9.3.1 Tiers 元素
+
+```json
+{
+    "Name": "peak",
+    "TimeRanges": [
+        { "Weekdays": [1, 2, 3, 4, 5], "Start": "09:00", "End": "12:00" },
+        { "Weekdays": [1, 2, 3, 4, 5], "Start": "14:00", "End": "18:00" }
+    ]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Name | string | Y | Tier 名称；**初期只支持 `peak`** | 非空；当前仅支持 `peak` |
+| TimeRanges | []object | Y | 该 tier 生效的时间范围列表；命中任意一个即属于该 tier；按列表顺序匹配 | 元素见 [9.3.1.1 TimeRanges 元素](#9311-timeranges-元素) |
+
+##### 9.3.1.1 TimeRanges 元素
+
+```json
+{ "Weekdays": [1, 2, 3, 4, 5], "Start": "09:00", "End": "12:00" }
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Weekdays | []integer | N | 生效的星期几；`0`=周日，`1`=周一，...，`6`=周六；为空表示每天 | 元素取值范围 `0-6` |
+| Start | string | Y | 开始时间，格式 `HH:MM` | 合法时间格式；须 < `End` |
+| End | string | Y | 结束时间，格式 `HH:MM`；区间为左闭右开 `[Start, End)` | 合法时间格式；须 > `Start` |
+
+#### 9.3.2 Models 元素
+
+```json
+{
+    "Provider": "deepseek",
+    "Model": "deepseek-v4-pro",
+    "BaseModel": "deepseek-v4-pro",
+    "Mode": "chat",
+    "Capabilities": ["chat", "reasoning", "tools", "prompt_caching"],
+    "SupportedParameters": ["temperature", "max_tokens"],
+    "Limits": { /* 限制对象 */ },
+    "Prices": { /* 默认价格 */ },
+    "TierPrices": { /* 分时段价格 */ }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 | 合法性条件 |
+|------|------|------|------|------------|
+| Provider | string | Y | Provider 名 | 非空 |
+| Model | string | Y | 模型名，用于匹配请求中的 `target_model` | 非空 |
+| BaseModel | string | Y | 归一化模型名 | 非空 |
+| Mode | string | N | 请求模式，例如 `chat` | - |
+| Capabilities | []string | N | 能力列表，例如 `["chat", "reasoning"]` | - |
+| SupportedParameters | []string | N | 支持的请求参数列表，例如 `["temperature", "max_tokens"]` | - |
+| Limits | map[string]integer | N | 限制对象，例如 `context_window` 等 | - |
+| Prices | map[string]number | N | 默认价格对象；未命中任何 tier 时使用 | - |
+| TierPrices | map[string]map[string]number | N | 分时段价格对象；tier name -> 价格表。**初期 tier name 只支持 `peak`**；tier 内未配置的键 fallback 到 `Prices` | 内部键名须为 `prices` 枚举键名 |
+
+---
+
+## 10. 配置示例
 
 ```json
 {
@@ -345,82 +553,175 @@ cluster_conf.data为集群转发配置文件。
                         }
                     ]
                 }
+            }
+        },
+        "ai_cluster_anthropic_example": {
+            "BackendConf": {
+                "Protocol": "https",
+                "TimeoutConnSrv": 2000,
+                "TimeoutResponseHeader": 50000,
+                "MaxIdleConnsPerHost": 0,
+                "RetryLevel": 0
             },
-            "ai_cluster_anthropic_example": {
-                "BackendConf": {
-                    "Protocol": "https",
-                    "TimeoutConnSrv": 2000,
-                    "TimeoutResponseHeader": 50000,
-                    "MaxIdleConnsPerHost": 0,
-                    "RetryLevel": 0
-                },
-                "CheckConf": {
-                    "Schem": "https",
-                    "Uri": "/healthcheck",
-                    "Host": "example.org",
-                    "StatusCode": 200,
-                    "FailNum": 10,
-                    "CheckInterval": 1000
-                },
-                "GslbBasic": {
-                    "CrossRetry": 0,
-                    "RetryMax": 2,
-                    "HashConf": {
-                        "HashStrategy": 0,
-                        "HashHeader": "Cookie:UID",
-                        "SessionSticky": false
+            "CheckConf": {
+                "Schem": "https",
+                "Uri": "/healthcheck",
+                "Host": "example.org",
+                "StatusCode": 200,
+                "FailNum": 10,
+                "CheckInterval": 1000
+            },
+            "GslbBasic": {
+                "CrossRetry": 0,
+                "RetryMax": 2,
+                "HashConf": {
+                    "HashStrategy": 0,
+                    "HashHeader": "Cookie:UID",
+                    "SessionSticky": false
+                }
+            },
+            "ClusterBasic": {
+                "TimeoutReadClient": 30000,
+                "TimeoutWriteClient": 60000,
+                "TimeoutReadClientAgain": 60000,
+                "ReqWriteBufferSize": 512,
+                "ReqFlushInterval": 0,
+                "ResFlushInterval": -1,
+                "CancelOnClientClose": false
+            },
+            "AIConf": {
+                "Type": 0,
+                "Provider": "my-anthropic",
+                "ModelProtocols": ["anthropic"],
+                "Keys": [
+                    {
+                        "Name": "key-primary",
+                        "Key": "sk-ant-api03-example",
+                        "Weight": 100
                     }
+                ],
+                "KeyPolicy": {
+                    "Strategy": "weighted_random",
+                    "MaxRetries": 3,
+                    "RetryBackoffInitial": 500,
+                    "RetryBackoffMax": 5000
                 },
-                "ClusterBasic": {
-                    "TimeoutReadClient": 30000,
-                    "TimeoutWriteClient": 60000,
-                    "TimeoutReadClientAgain": 60000,
-                    "ReqWriteBufferSize": 512,
-                    "ReqFlushInterval": 0,
-                    "ResFlushInterval": -1,
-                    "CancelOnClientClose": false
-                },
-                "AIConf": {
-                    "Type": 0,
-                    "Provider": "my-anthropic",
-                    "ModelProtocols": ["anthropic"],
-                    "Keys": [
+                "ModelTable": {
+                    "Currency": "RMB",
+                    "Models": [
                         {
-                            "Name": "key-primary",
-                            "Key": "sk-ant-api03-example",
-                            "Weight": 100
+                            "Provider": "my-anthropic",
+                            "Model": "claude-3-5-sonnet",
+                            "BaseModel": "claude-3-5-sonnet",
+                            "Mode": "chat",
+                            "Capabilities": ["chat", "tools"],
+                            "SupportedParameters": ["temperature", "max_tokens"],
+                            "Limits": {
+                                "context_window": 200000,
+                                "max_input_tokens": 200000,
+                                "max_output_tokens": 8192
+                            },
+                            "Prices": {
+                                "input_cost_per_token": 0.000003,
+                                "output_cost_per_token": 0.000015,
+                                "cache_read_input_token_cost": 0.000000375,
+                                "cache_creation_input_token_cost": 0.00000375
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        "ai_cluster_deepseek_tiered_example": {
+            "BackendConf": {
+                "Protocol": "https",
+                "TimeoutConnSrv": 2000,
+                "TimeoutResponseHeader": 50000,
+                "MaxIdleConnsPerHost": 0,
+                "RetryLevel": 0
+            },
+            "CheckConf": {
+                "Schem": "https",
+                "Uri": "/healthcheck",
+                "Host": "example.org",
+                "StatusCode": 200,
+                "FailNum": 10,
+                "CheckInterval": 1000
+            },
+            "GslbBasic": {
+                "CrossRetry": 0,
+                "RetryMax": 2,
+                "HashConf": {
+                    "HashStrategy": 0,
+                    "HashHeader": "Cookie:UID",
+                    "SessionSticky": false
+                }
+            },
+            "ClusterBasic": {
+                "TimeoutReadClient": 30000,
+                "TimeoutWriteClient": 60000,
+                "TimeoutReadClientAgain": 60000,
+                "ReqWriteBufferSize": 512,
+                "ReqFlushInterval": 0,
+                "ResFlushInterval": -1,
+                "CancelOnClientClose": false
+            },
+            "AIConf": {
+                "Type": 0,
+                "Provider": "deepseek",
+                "ModelProtocols": ["openai"],
+                "Keys": [
+                    {
+                        "Name": "key-primary",
+                        "Key": "sk-example-api-key",
+                        "Weight": 100
+                    }
+                ],
+                "KeyPolicy": {
+                    "Strategy": "weighted_random",
+                    "MaxRetries": 3,
+                    "RetryBackoffInitial": 500,
+                    "RetryBackoffMax": 5000
+                },
+                "ModelTable": {
+                    "Currency": "RMB",
+                    "TimeZone": "Asia/Shanghai",
+                    "Tiers": [
+                        {
+                            "Name": "peak",
+                            "TimeRanges": [
+                                { "Weekdays": [1, 2, 3, 4, 5], "Start": "09:00", "End": "12:00" },
+                                { "Weekdays": [1, 2, 3, 4, 5], "Start": "14:00", "End": "18:00" }
+                            ]
                         }
                     ],
-                    "KeyPolicy": {
-                        "Strategy": "weighted_random",
-                        "MaxRetries": 3,
-                        "RetryBackoffInitial": 500,
-                        "RetryBackoffMax": 5000
-                    },
-                    "ModelTable": {
-                        "Currency": "RMB",
-                        "Models": [
-                            {
-                                "Provider": "my-anthropic",
-                                "Model": "claude-3-5-sonnet",
-                                "BaseModel": "claude-3-5-sonnet",
-                                "Mode": "chat",
-                                "Capabilities": ["chat", "tools"],
-                                "SupportedParameters": ["temperature", "max_tokens"],
-                                "Limits": {
-                                    "context_window": 200000,
-                                    "max_input_tokens": 200000,
-                                    "max_output_tokens": 8192
-                                },
-                                "Prices": {
-                                    "input_cost_per_token": 0.000003,
-                                    "output_cost_per_token": 0.000015,
-                                    "cache_read_input_token_cost": 0.000000375,
-                                    "cache_creation_input_token_cost": 0.00000375
+                    "Models": [
+                        {
+                            "Provider": "deepseek",
+                            "Model": "deepseek-v4-pro",
+                            "BaseModel": "deepseek-v4-pro",
+                            "Mode": "chat",
+                            "Capabilities": ["chat", "reasoning", "tools", "prompt_caching"],
+                            "SupportedParameters": ["temperature", "max_tokens"],
+                            "Limits": {
+                                "context_window": 128000,
+                                "max_input_tokens": 128000,
+                                "max_output_tokens": 8192
+                            },
+                            "Prices": {
+                                "input_cost_per_token": 0.0000045,
+                                "output_cost_per_token": 0.0000135,
+                                "cache_read_input_token_cost": 0.00000015
+                            },
+                            "TierPrices": {
+                                "peak": {
+                                    "input_cost_per_token": 0.000009,
+                                    "output_cost_per_token": 0.000027,
+                                    "cache_read_input_token_cost": 0.0000003
                                 }
                             }
-                        ]
-                    }
+                        }
+                    ]
                 }
             }
         }
@@ -428,14 +729,16 @@ cluster_conf.data为集群转发配置文件。
 }
 ```
 
-## 注解
+---
 
-### 1. StatusCodeRange 
+## 11. 注解
 
-- 响应状态码范围。如果配置了StatusCode，则会忽略此验证条件
+### 11.1 StatusCodeRange
+
+- 响应状态码范围。如果配置了 `StatusCode`，则会忽略此验证条件。
 - 合法的配置项举例：
-  1. `"3xx"`, `"4xx"`, `"5xx"` 其中之一
-  2. 特定的HTTP返回码，与StatusCode功能一致
-  3. `"|"` 符号连接的上述 (1)或 (2) 例如： 
+  1. `"3xx"`、`"4xx"`、`"5xx"` 其中之一。
+  2. 特定的 HTTP 返回码，与 `StatusCode` 功能一致。
+  3. `"|"` 符号连接的上述 (1) 或 (2)，例如：
      - `"503|4xx"`
      - `"501|409|30x"`

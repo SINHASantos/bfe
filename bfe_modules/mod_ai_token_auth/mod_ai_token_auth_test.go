@@ -1533,3 +1533,122 @@ func TestQuotaPlanDeduct(t *testing.T) {
 		}
 	})
 }
+
+func buildTestClusterConfWithTiers(model string, inputCost, outputCost, cacheReadCost float64,
+	peakInputCost, peakOutputCost, peakCacheReadCost float64) *bfe_cluster.BfeCluster {
+	modelTable := &cluster_conf.ModelTable{
+		Currency: "RMB",
+		TimeZone: "Asia/Shanghai",
+		Tiers: []cluster_conf.PriceTier{
+			{
+				Name: "peak",
+				TimeRanges: []cluster_conf.TimeRange{
+					{Weekdays: []int{1, 2, 3, 4, 5}, Start: "09:00", End: "12:00"},
+					{Weekdays: []int{1, 2, 3, 4, 5}, Start: "14:00", End: "18:00"},
+				},
+			},
+		},
+		Models: []cluster_conf.ModelPrice{
+			{
+				Model:     model,
+				BaseModel: model,
+				Mode:      "chat",
+				Prices: map[string]float64{
+					cluster_conf.PriceInputCostPerToken:       inputCost,
+					cluster_conf.PriceOutputCostPerToken:      outputCost,
+					cluster_conf.PriceCacheReadInputTokenCost: cacheReadCost,
+				},
+				TierPrices: map[string]map[string]float64{
+					"peak": {
+						cluster_conf.PriceInputCostPerToken:       peakInputCost,
+						cluster_conf.PriceOutputCostPerToken:      peakOutputCost,
+						cluster_conf.PriceCacheReadInputTokenCost: peakCacheReadCost,
+					},
+				},
+			},
+		},
+	}
+	if err := cluster_conf.ModelTableCheck(modelTable); err != nil {
+		panic(fmt.Sprintf("ModelTableCheck failed: %v", err))
+	}
+
+	c := bfe_cluster.NewBfeCluster("test-cluster")
+	c.AIConf = &cluster_conf.AIConf{
+		ModelTable: modelTable,
+	}
+	return c
+}
+
+func TestCalcChatCost_Tier(t *testing.T) {
+	cluster := buildTestClusterConfWithTiers("deepseek-v4-pro",
+		0.0000045, 0.0000135, 0.00000015,
+		0.000009, 0.000027, 0.0000003)
+	entry := cluster.AIConf.ModelTable.Models[0]
+
+	usage := &bfe_basic.TokenUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+	}
+
+	// off-peak: 1000 * 4.5e-6 + 500 * 1.35e-5
+	offPeakExpected := 1000*quota.RmbToFixedPoint(0.0000045) + 500*quota.RmbToFixedPoint(0.0000135)
+	if got := calcChatCost(&entry, usage, ""); got != offPeakExpected {
+		t.Errorf("off-peak cost = %d, want %d", got, offPeakExpected)
+	}
+
+	// peak: 1000 * 9e-6 + 500 * 2.7e-5
+	peakExpected := 1000*quota.RmbToFixedPoint(0.000009) + 500*quota.RmbToFixedPoint(0.000027)
+	if got := calcChatCost(&entry, usage, "peak"); got != peakExpected {
+		t.Errorf("peak cost = %d, want %d", got, peakExpected)
+	}
+}
+
+func TestCalcChatCost_TierWithCache(t *testing.T) {
+	cluster := buildTestClusterConfWithTiers("deepseek-v4-pro",
+		0.0000045, 0.0000135, 0.00000015,
+		0.000009, 0.000027, 0.0000003)
+	entry := cluster.AIConf.ModelTable.Models[0]
+
+	usage := &bfe_basic.TokenUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		CacheReadTokens:  400,
+	}
+
+	// peak with cache: 600 * 9e-6 + 400 * 3e-7 + 500 * 2.7e-5
+	peakExpected := 600*quota.RmbToFixedPoint(0.000009) + 400*quota.RmbToFixedPoint(0.0000003) + 500*quota.RmbToFixedPoint(0.000027)
+	if got := calcChatCost(&entry, usage, "peak"); got != peakExpected {
+		t.Errorf("peak+cache cost = %d, want %d", got, peakExpected)
+	}
+
+	// off-peak with cache: 600 * 4.5e-6 + 400 * 1.5e-7 + 500 * 1.35e-5
+	offPeakExpected := 600*quota.RmbToFixedPoint(0.0000045) + 400*quota.RmbToFixedPoint(0.00000015) + 500*quota.RmbToFixedPoint(0.0000135)
+	if got := calcChatCost(&entry, usage, ""); got != offPeakExpected {
+		t.Errorf("off-peak+cache cost = %d, want %d", got, offPeakExpected)
+	}
+}
+
+func TestCalcCostUnits_Tier(t *testing.T) {
+	m := NewModuleAITokenAuth()
+	clusterName := "deepseek-tiered"
+	model := "deepseek-v4-pro"
+	req := newTestRequestWithCluster("ak-123", "AI_product", clusterName, model)
+	cluster := buildTestClusterConfWithTiers(model,
+		0.0000045, 0.0000135, 0,
+		0.000009, 0.000027, 0)
+	req.SvrDataConf = &mockServerDataConf{clusters: map[string]*bfe_cluster.BfeCluster{clusterName: cluster}}
+
+	usage := &bfe_basic.TokenUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+	}
+
+	got := m.calcCostUnits(req, req.SvrDataConf, usage)
+	// Result depends on whether current Asia/Shanghai time hits peak tier.
+	// Just verify it is one of the two expected values.
+	offPeakExpected := 1000*quota.RmbToFixedPoint(0.0000045) + 500*quota.RmbToFixedPoint(0.0000135)
+	peakExpected := 1000*quota.RmbToFixedPoint(0.000009) + 500*quota.RmbToFixedPoint(0.000027)
+	if got != offPeakExpected && got != peakExpected {
+		t.Errorf("cost = %d, want either off-peak %d or peak %d", got, offPeakExpected, peakExpected)
+	}
+}
