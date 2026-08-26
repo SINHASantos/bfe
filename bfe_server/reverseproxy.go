@@ -21,7 +21,9 @@
 package bfe_server
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +49,7 @@ import (
 	"github.com/bfenetworks/bfe/bfe_http"
 	"github.com/bfenetworks/bfe/bfe_http2"
 	"github.com/bfenetworks/bfe/bfe_module"
+	"github.com/bfenetworks/bfe/bfe_modules/mod_ai_rate_limit"
 	"github.com/bfenetworks/bfe/bfe_modules/mod_ai_token_auth"
 	"github.com/bfenetworks/bfe/bfe_modules/mod_body_process"
 	"github.com/bfenetworks/bfe/bfe_route"
@@ -54,6 +57,7 @@ import (
 	"github.com/bfenetworks/bfe/bfe_spdy"
 	"github.com/bfenetworks/bfe/bfe_util"
 	"github.com/bfenetworks/bfe/bfe_util/epp"
+	"github.com/bfenetworks/bfe/bfe_util/redis_client"
 )
 
 // TrailerPrefix is a magic prefix for ResponseWriter.Header map keys
@@ -1639,6 +1643,18 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 
 	state := newAIKeyAttemptState()
 
+	// session-level key affinity
+	var redisClient redis_client.Client
+	if policy.SessionAffinity && srv.Modules != nil {
+		if module := srv.Modules.GetModule(mod_ai_rate_limit.ModAiRateLimit); module != nil {
+			if m, ok := module.(*mod_ai_rate_limit.ModuleAiRateLimit); ok {
+				redisClient = m.RedisClient()
+			}
+		}
+	}
+	sessionID := clientKeySessionID(basicReq)
+	boundName := ""
+
 	var lastErr error
 	var idx int
 	var key cluster_conf.AIKey
@@ -1660,7 +1676,7 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		}
 
 		if !keepKey {
-			idx, key, ok = chooseNextAIKey(keys, state)
+			idx, key, boundName, ok = chooseAIKeyWithAffinity(cluster.Name, keys, policy, state, redisClient, sessionID, p.proxyState)
 			if !ok {
 				log.Logger.Warn("aiClusterInvoke: all ai keys exhausted for cluster[%s]", attempt.ClusterName)
 				break
@@ -1681,6 +1697,14 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 
 		// success: stop key-level retry
 		if err == nil && statusCode < 400 {
+			if policy.SessionAffinity && redisClient != nil && sessionID != "" && key.Name != boundName {
+				if err := redisSetBinding(cluster.Name, sessionID, key.Name, policy, redisClient); err != nil {
+					log.Logger.Warn("aiClusterInvoke: redis set binding error[%v]", err)
+					p.proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+				} else {
+					p.proxyState.ReqAiKeyAffinityRebind.Inc(1)
+				}
+			}
 			return res, action, cluster, nil, newBodyModel
 		}
 
@@ -1689,10 +1713,22 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		case statusCode == 429:
 			// rate limit: mark key as used and rotate to another key
 			state.usedSet[idx] = struct{}{}
+			if policy.SessionAffinity && policy.SessionAffinityPenaltyEnable && redisClient != nil {
+				setKeyPenalty(cluster.Name, key.Name, "429", 60, policy, redisClient)
+				if sessionID != "" {
+					redisDeleteBinding(cluster.Name, sessionID, policy, redisClient)
+				}
+			}
 			log.Logger.Info("aiClusterInvoke: ai key [name=%s] rate limited (429), rotate", key.Name)
 		case statusCode == 401 || statusCode == 402 || statusCode == 403:
 			// auth failure: mark key as dead
 			state.deadSet[idx] = struct{}{}
+			if policy.SessionAffinity && policy.SessionAffinityPenaltyEnable && redisClient != nil {
+				setKeyPenalty(cluster.Name, key.Name, fmt.Sprintf("%d", statusCode), 3600, policy, redisClient)
+				if sessionID != "" {
+					redisDeleteBinding(cluster.Name, sessionID, policy, redisClient)
+				}
+			}
 			log.Logger.Info("aiClusterInvoke: ai key [name=%s] auth failed (%d), dead", key.Name, statusCode)
 		case statusCode >= 500 || err != nil:
 			// transient server failure or connection error:
@@ -1914,11 +1950,193 @@ func calcBackoff(initial, max, attempt int) time.Duration {
 // defaultAIKeyPolicy returns the default key policy.
 func defaultAIKeyPolicy() cluster_conf.AIKeyPolicy {
 	return cluster_conf.AIKeyPolicy{
-		Strategy:            "weighted_random",
-		MaxRetries:          0,
-		RetryBackoffInitial: 500,
-		RetryBackoffMax:     5000,
+		Strategy:                     "weighted_random",
+		MaxRetries:                   0,
+		RetryBackoffInitial:          500,
+		RetryBackoffMax:              5000,
+		SessionAffinity:              false,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
 	}
+}
+
+// clientKeySessionID returns the session identifier for API-Key affinity.
+// It prefers the stable ClientKeyId; if absent, falls back to a hash of the
+// raw API-Key value.
+func clientKeySessionID(basicReq *bfe_basic.Request) string {
+	if ai := basicReq.GetAiBasicInfo(); ai != nil && ai.ClientKeyId != "" {
+		return ai.ClientKeyId
+	}
+	key := bfe_basic.GetApiKey(basicReq)
+	if key == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+// aiKeyAffinityRedisKey returns the Redis key for session->key binding.
+func aiKeyAffinityRedisKey(clusterName, sessionID, prefix string) string {
+	return fmt.Sprintf("%s:%s:%s", prefix, clusterName, sessionID)
+}
+
+// aiKeyAffinityPenaltyRedisKey returns the Redis key for key penalty.
+func aiKeyAffinityPenaltyRedisKey(clusterName, keyName, prefix string) string {
+	return fmt.Sprintf("%s:penalty:%s:%s", prefix, clusterName, keyName)
+}
+
+func redisGetBinding(clusterName, sessionID string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) (string, error) {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	val, err := client.Get(key)
+	if err != nil {
+		return "", err
+	}
+	if val == nil {
+		return "", nil
+	}
+	b, ok := val.([]byte)
+	if !ok {
+		return "", fmt.Errorf("unexpected redis value type %T", val)
+	}
+	return string(b), nil
+}
+
+func redisSetBinding(clusterName, sessionID, keyName string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) error {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	return client.Setex(key, []byte(keyName), policy.SessionAffinityTTL)
+}
+
+func redisDeleteBinding(clusterName, sessionID string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) error {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	return client.Delete(key)
+}
+
+func isKeyPenalized(clusterName, keyName string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) bool {
+	key := aiKeyAffinityPenaltyRedisKey(clusterName, keyName, policy.SessionAffinityRedisPrefix)
+	val, err := client.Get(key)
+	if err != nil {
+		return false
+	}
+	return val != nil
+}
+
+func setKeyPenalty(clusterName, keyName, reason string, ttl int, policy cluster_conf.AIKeyPolicy, client redis_client.Client) {
+	key := aiKeyAffinityPenaltyRedisKey(clusterName, keyName, policy.SessionAffinityRedisPrefix)
+	if err := client.Setex(key, []byte(reason), ttl); err != nil {
+		log.Logger.Warn("aiKeyAffinity: set penalty error[%v]", err)
+	}
+}
+
+func filterPenaltyKeys(clusterName string, keys []cluster_conf.AIKey, policy cluster_conf.AIKeyPolicy, client redis_client.Client) ([]cluster_conf.AIKey, int) {
+	var filtered []cluster_conf.AIKey
+	skipped := 0
+	for _, k := range keys {
+		if !isKeyPenalized(clusterName, k.Name, policy, client) {
+			filtered = append(filtered, k)
+		} else {
+			skipped++
+		}
+	}
+	if len(filtered) == 0 {
+		// all keys are penalized; fallback to original list to avoid no key
+		return keys, skipped
+	}
+	return filtered, skipped
+}
+
+func findKeyIndexByName(name string, keys []cluster_conf.AIKey) int {
+	for i, k := range keys {
+		if k.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func isKeyAlive(idx int, keys []cluster_conf.AIKey, state *aiKeyAttemptState) bool {
+	if idx < 0 || idx >= len(keys) {
+		return false
+	}
+	if keys[idx].Weight == 0 {
+		return false
+	}
+	if _, dead := state.deadSet[idx]; dead {
+		return false
+	}
+	return true
+}
+
+// chooseAIKeyWithAffinity selects the next eligible AI key, optionally using
+// Redis to maintain a session-level binding from ClientKeyId to key name.
+// It returns the selected key index, the key, the bound key name (if any),
+// and whether a key was successfully selected.
+func chooseAIKeyWithAffinity(
+	clusterName string,
+	keys []cluster_conf.AIKey,
+	policy cluster_conf.AIKeyPolicy,
+	state *aiKeyAttemptState,
+	client redis_client.Client,
+	sessionID string,
+	proxyState *ProxyState,
+) (int, cluster_conf.AIKey, string, bool) {
+
+	if !policy.SessionAffinity || client == nil || sessionID == "" {
+		idx, key, ok := chooseNextAIKey(keys, state)
+		return idx, key, "", ok
+	}
+
+	// short-circuit: single valid key needs no Redis lookup/write.
+	// Treat it as already bound so the success path does not rewrite Redis.
+	if len(keys) == 1 && keys[0].Weight > 0 {
+		return 0, keys[0], keys[0].Name, true
+	}
+
+	candidateKeys := keys
+	penaltySkipCount := 0
+	if policy.SessionAffinityPenaltyEnable {
+		candidateKeys, penaltySkipCount = filterPenaltyKeys(clusterName, keys, policy, client)
+	}
+
+	boundName, err := redisGetBinding(clusterName, sessionID, policy, client)
+	if err != nil {
+		log.Logger.Warn("aiKeyAffinity: redis get binding error[%v], fallback to random", err)
+		if proxyState != nil {
+			proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+		}
+		idx, key, ok := chooseNextAIKey(candidateKeys, state)
+		return idx, key, "", ok
+	}
+
+	if boundName != "" {
+		idx := findKeyIndexByName(boundName, keys)
+		if idx >= 0 && isKeyAlive(idx, keys, state) && !isKeyPenalized(clusterName, boundName, policy, client) {
+			if proxyState != nil {
+				proxyState.ReqAiKeyAffinityHit.Inc(1)
+			}
+			return idx, keys[idx], boundName, true
+		}
+		// binding stale (key removed/dead/penalized), continue to select a new key
+	}
+
+	idx, key, ok := chooseNextAIKey(candidateKeys, state)
+	if ok {
+		if err := redisSetBinding(clusterName, sessionID, key.Name, policy, client); err != nil {
+			log.Logger.Warn("aiKeyAffinity: redis set binding error[%v]", err)
+			if proxyState != nil {
+				proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+			}
+		}
+	}
+	if proxyState != nil {
+		if boundName == "" {
+			proxyState.ReqAiKeyAffinityMiss.Inc(1)
+		}
+		if penaltySkipCount > 0 {
+			proxyState.ReqAiKeyAffinityPenaltySkip.Inc(uint(penaltySkipCount))
+		}
+	}
+	return idx, key, boundName, ok
 }
 
 // clusterSupportsAuthStyle checks whether the cluster provider supports the

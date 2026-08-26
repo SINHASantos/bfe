@@ -78,6 +78,10 @@ type ModuleAiRateLimit struct {
 	isRejectOnRedisError bool
 }
 
+func (m *ModuleAiRateLimit) RedisClient() redis_client.Client {
+	return m.redisClient
+}
+
 func NewModuleAiRateLimit() *ModuleAiRateLimit {
 	m := new(ModuleAiRateLimit)
 	m.name = ModAiRateLimit

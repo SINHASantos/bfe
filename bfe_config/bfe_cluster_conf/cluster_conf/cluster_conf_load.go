@@ -142,6 +142,12 @@ type AIKeyPolicy struct {
 	MaxRetries          int    // total retry budget within one aiClusterInvoke call
 	RetryBackoffInitial int    // ms
 	RetryBackoffMax     int    // ms
+
+	// Session-level API-Key affinity based on Redis + ClientKeyId
+	SessionAffinity              bool   // default false
+	SessionAffinityTTL           int    // Redis binding TTL in seconds, default 300
+	SessionAffinityRedisPrefix   string // Redis key prefix, default "bfe:ai:key_affinity"
+	SessionAffinityPenaltyEnable bool   // skip Keys recently returned 429/401/403, default true
 }
 
 // TimeRange defines a single time range within a week for a pricing tier.
@@ -831,6 +837,35 @@ func AIConfCheck(conf *AIConf) error {
 		}
 	}
 
+	if conf.KeyPolicy != nil {
+		if err := AIKeyPolicyCheck(conf.KeyPolicy); err != nil {
+			return fmt.Errorf("KeyPolicy:%s", err.Error())
+		}
+	}
+
+	return nil
+}
+
+// AIKeyPolicyCheck checks and fills defaults for AIKeyPolicy.
+func AIKeyPolicyCheck(policy *AIKeyPolicy) error {
+	if policy.SessionAffinityTTL < 0 {
+		return fmt.Errorf("SessionAffinityTTL must be >= 0")
+	}
+	if policy.SessionAffinityTTL == 0 {
+		policy.SessionAffinityTTL = 300
+	}
+	if policy.SessionAffinityRedisPrefix == "" {
+		policy.SessionAffinityRedisPrefix = "bfe:ai:key_affinity"
+	}
+	if policy.Strategy == "" {
+		policy.Strategy = "weighted_random"
+	}
+	if policy.RetryBackoffInitial < 0 {
+		return fmt.Errorf("RetryBackoffInitial must be >= 0")
+	}
+	if policy.RetryBackoffMax < 0 {
+		return fmt.Errorf("RetryBackoffMax must be >= 0")
+	}
 	return nil
 }
 

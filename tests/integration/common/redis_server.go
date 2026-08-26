@@ -66,3 +66,8 @@ func (s *RedisServer) GetQuota(key string) int64 {
 	}
 	return value
 }
+
+// Exists reports whether the given key is present in redis.
+func (s *RedisServer) Exists(key string) bool {
+	return s.server.Exists(key)
+}

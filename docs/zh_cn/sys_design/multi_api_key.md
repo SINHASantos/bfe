@@ -39,6 +39,12 @@ type AIKeyPolicy struct {
     MaxRetries          int    // total retry budget within one aiClusterInvoke call
     RetryBackoffInitial int    // ms
     RetryBackoffMax     int    // ms
+
+    // 会话级 Key 亲和性
+    SessionAffinity              bool   // 默认 false
+    SessionAffinityTTL           int    // Redis 绑定 TTL，单位秒，默认 300
+    SessionAffinityRedisPrefix   string // Redis key 前缀，默认 "bfe:ai:key_affinity"
+    SessionAffinityPenaltyEnable bool   // 是否开启 Key 惩罚，默认 true
 }
 
 // ModelPrice represents a single model pricing entry
@@ -391,6 +397,133 @@ func calcBackoff(initial, max, attempt int) time.Duration {
 }
 ```
 
+### 3.5 会话级 Key 亲和性（可选）
+
+当 `AIKeyPolicy.SessionAffinity = true` 时，BFE 会基于 `ClientKeyId` 在 Redis 中维护会话到 API-Key 的绑定，使得同一客户的多次请求尽量命中同一个 Provider Key，从而提升跨账户多 Key 场景下的 prompt cache 命中率。
+
+#### 3.5.1 会话标识
+
+使用 BFE 内部 `AiBasicInfo.ClientKeyId` 作为 session id：
+
+- 无需客户端传递额外 header/cookie；
+- 比 TCP 连接更稳定（现代客户端普遍存在连接池 / HTTP/2 多路复用）；
+- 客户更新 API-Key 值时，只要 `ClientKeyId` 不变，绑定仍然有效。
+
+#### 3.5.2 Redis 数据结构
+
+**客户绑定：**
+
+```
+key:   {prefix}:{cluster_name}:{client_key_id}
+value: <key_name>
+TTL:   session_affinity_ttl 秒
+```
+
+示例：
+
+```
+bfe:ai:key_affinity:deepseek-cluster:ckt-abc-123 -> "key-primary"  (TTL=300)
+```
+
+**Key 惩罚（可选）：**
+
+```
+key:   {prefix}:penalty:{cluster_name}:{key_name}
+value: <reason_code>
+TTL:   429 为 60 秒；401/403 为 3600 秒
+```
+
+#### 3.5.3 选择流程
+
+在 `aiClusterInvoke()` 中，将原来的 `chooseNextAIKey(keys, state)` 替换为 `chooseAIKeyWithAffinity(...)`：
+
+1. 若未开启亲和性、无 Redis 客户端或 `ClientKeyId` 为空，回退到加权随机；
+2. 若 cluster 只有一个有效 Key，直接短路返回，不访问 Redis；
+3. 若开启惩罚，先过滤被惩罚的 Key；
+4. 从 Redis 读取 `ClientKeyId -> key_name` 绑定：
+   - 命中且 Key 仍有效：返回该 Key；
+   - 未命中：按候选列表加权随机选择，并写入新绑定。
+
+```go
+func chooseAIKeyWithAffinity(
+    basicReq *bfe_basic.Request,
+    clusterName string,
+    keys []cluster_conf.AIKey,
+    policy cluster_conf.AIKeyPolicy,
+    state *aiKeyAttemptState,
+    redisClient redis_client.Client,
+) (int, cluster_conf.AIKey, bool) {
+
+    if !policy.SessionAffinity || redisClient == nil {
+        return chooseNextAIKey(keys, state)
+    }
+
+    sessionID := clientKeySessionID(basicReq)
+    if sessionID == "" {
+        return chooseNextAIKey(keys, state)
+    }
+
+    if len(keys) == 1 && keys[0].Weight > 0 {
+        return 0, keys[0], true
+    }
+
+    candidateKeys := keys
+    if policy.SessionAffinityPenaltyEnable {
+        candidateKeys = filterPenaltyKeys(clusterName, keys, redisClient)
+    }
+
+    boundName, err := redisGetBinding(clusterName, sessionID, policy, redisClient)
+    if err != nil {
+        incAffinityRedisErr(clusterName)
+        return chooseNextAIKey(keys, state)
+    }
+
+    if boundName != "" {
+        idx := findKeyIndexByName(boundName, keys)
+        if idx >= 0 && isKeyAlive(idx, keys, state) &&
+           !isKeyPenalized(clusterName, boundName, redisClient) {
+            incAffinityHit(clusterName)
+            return idx, keys[idx], true
+        }
+    }
+
+    idx, key, ok := chooseNextAIKey(candidateKeys, state)
+    if ok {
+        if err := redisSetBinding(clusterName, sessionID, key.Name, policy, redisClient); err != nil {
+            incAffinityRedisErr(clusterName)
+        }
+    }
+    return idx, key, ok
+}
+```
+
+#### 3.5.4 失败处理与重新绑定
+
+在 Key 级失败处理分支中增加：
+
+| 错误类型 | 原有处理 | 亲和性增强 |
+|---|---|---|
+| 429 | 标记 `used` | 写短 TTL 惩罚键；删除本客户绑定；切换成功后更新绑定 |
+| 401 / 402 / 403 | 标记 `dead` | 写长 TTL 惩罚键；删除本客户绑定；切换成功后更新绑定 |
+| 5xx / 连接错误 | 同 Key 退避重试 | 重试耗尽后换 Key，成功则更新绑定 |
+
+当最终成功且实际使用 Key 与绑定不一致时：
+
+```go
+if success && usedKey.Name != boundName {
+    redisSetBinding(clusterName, sessionID, usedKey.Name, policy, redisClient)
+}
+```
+
+#### 3.5.5 Redis 故障降级
+
+| 场景 | 行为 |
+|---|---|
+| Redis Get 失败 | 记录错误指标，回退到加权随机 |
+| Redis Setex 失败 | 记录错误指标，仍按选择结果转发 |
+| Redis 超时 | 设置较短读写超时，避免阻塞推理请求 |
+| Redis 完全不可用 | 亲和能力退化为无状态加权随机 |
+
 ---
 
 ## 4. 失败分类与边界
@@ -448,6 +581,11 @@ func shouldTriggerFallback(res *bfe_http.Response, err error) bool {
 | `ReqAiKeyRotation` | Counter | Key 轮换次数（按 429/401/403 分类） |
 | `ReqAiKeyRetry` | Counter | Key 级重试次数 |
 | `ReqAiKeyExhausted` | Counter | Key 全部耗尽次数 |
+| `ReqAiKeyAffinityHit` | Counter | 命中 Redis 绑定次数 |
+| `ReqAiKeyAffinityMiss` | Counter | 未命中 Redis 绑定次数 |
+| `ReqAiKeyAffinityRebind` | Counter | 因失败重新绑定次数 |
+| `ReqAiKeyAffinityPenaltySkip` | Counter | 因惩罚跳过 Key 次数 |
+| `ReqAiKeyAffinityRedisErr` | Counter | Redis 操作失败次数 |
 
 关键日志：
 
@@ -483,7 +621,11 @@ aiClusterInvoke: all ai keys exhausted for cluster[%s]
             "Strategy": "weighted_random",
             "MaxRetries": 3,
             "RetryBackoffInitial": 500,
-            "RetryBackoffMax": 5000
+            "RetryBackoffMax": 5000,
+            "SessionAffinity": true,
+            "SessionAffinityTTL": 300,
+            "SessionAffinityRedisPrefix": "bfe:ai:key_affinity",
+            "SessionAffinityPenaltyEnable": true
         },
         "ModelMapping": {
             "gpt-4": "deepseek-v3"
@@ -521,4 +663,7 @@ aiClusterInvoke: all ai keys exhausted for cluster[%s]
 1. **请求体可回退性**：Key 级重试依赖 `basicReq.HttpRequest.Body` 可重复读取。`aiClusterInvoke()` 会在启用 Key 级重试前调用 `prepareRequestBodyForRetry()`；
 2. **SSE 流式响应**：所有 Key 尝试完成后才返回响应，不会出现已开始发送后切换 Key 的情况；
 3. **与 `ServeHTTP()` 隔离**：多 API-Key 逻辑仅作用于 `ServeHTTPForAI()` 路径；
-4. **旧字段清理**：`AIConf.Key` 不再保留，统一使用 `AIConf.Keys`。
+4. **旧字段清理**：`AIConf.Key` 不再保留，统一使用 `AIConf.Keys`；
+5. **会话级亲和性依赖 Redis**：`SessionAffinity` 默认关闭，开启后需确保 `mod_ai_rate_limit` 的 Redis 配置可用；Redis 故障时自动降级为加权随机；
+6. **单 Key 短路**：当 `AIConf.Keys` 中只有一个有效 Key 时，无论是否开启亲和性，都不会访问 Redis；
+7. **ClientKeyId 稳定性**：会话绑定基于 `AiBasicInfo.ClientKeyId`，控制面更新 API-Key 值时应保持该 ID 不变，否则原有绑定会失效。
