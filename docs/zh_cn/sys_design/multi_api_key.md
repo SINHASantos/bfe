@@ -42,7 +42,7 @@ type AIKeyPolicy struct {
 
     // 会话级 Key 亲和性
     SessionAffinity              bool   // 默认 false
-    SessionAffinityTTL           int    // Redis 绑定 TTL，单位秒，默认 300
+    SessionAffinityTTL           int    // 绑定空闲超时时间，单位秒，默认 600
     SessionAffinityRedisPrefix   string // Redis key 前缀，默认 "bfe:ai:key_affinity"
     SessionAffinityPenaltyEnable bool   // 是否开启 Key 惩罚，默认 true
 }
@@ -416,14 +416,16 @@ func calcBackoff(initial, max, attempt int) time.Duration {
 ```
 key:   {prefix}:{cluster_name}:{client_key_id}
 value: <key_name>
-TTL:   session_affinity_ttl 秒
+TTL:   session_affinity_ttl 秒（每次命中后刷新）
 ```
 
 示例：
 
 ```
-bfe:ai:key_affinity:deepseek-cluster:ckt-abc-123 -> "key-primary"  (TTL=300)
+bfe:ai:key_affinity:deepseek-cluster:ckt-abc-123 -> "key-primary"  (TTL=600)
 ```
+
+`session_affinity_ttl` 是**空闲超时时间**，不是固定生命周期。只要同一个 `client_key_id` 在超时时间内持续请求，BFE 就会在命中绑定后调用 `Expire` 刷新 TTL；只有当会话空闲超过该时间，绑定才会自动释放。
 
 **Key 惩罚（可选）：**
 
@@ -483,6 +485,11 @@ func chooseAIKeyWithAffinity(
         if idx >= 0 && isKeyAlive(idx, keys, state) &&
            !isKeyPenalized(clusterName, boundName, redisClient) {
             incAffinityHit(clusterName)
+            // 刷新 TTL：将该绑定视为仍在活跃会话中使用
+            if err := redisClient.Expire(redisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix), policy.SessionAffinityTTL); err != nil {
+                log.Logger.Warn("aiKeyAffinity: refresh ttl error[%v]", err)
+                incAffinityRedisErr(clusterName)
+            }
             return idx, keys[idx], true
         }
     }
@@ -623,7 +630,7 @@ aiClusterInvoke: all ai keys exhausted for cluster[%s]
             "RetryBackoffInitial": 500,
             "RetryBackoffMax": 5000,
             "SessionAffinity": true,
-            "SessionAffinityTTL": 300,
+            "SessionAffinityTTL": 600,
             "SessionAffinityRedisPrefix": "bfe:ai:key_affinity",
             "SessionAffinityPenaltyEnable": true
         },

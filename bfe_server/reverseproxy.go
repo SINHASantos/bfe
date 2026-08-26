@@ -1955,7 +1955,7 @@ func defaultAIKeyPolicy() cluster_conf.AIKeyPolicy {
 		RetryBackoffInitial:          500,
 		RetryBackoffMax:              5000,
 		SessionAffinity:              false,
-		SessionAffinityTTL:           300,
+		SessionAffinityTTL:           600,
 		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
 		SessionAffinityPenaltyEnable: true,
 	}
@@ -2113,6 +2113,13 @@ func chooseAIKeyWithAffinity(
 		if idx >= 0 && isKeyAlive(idx, keys, state) && !isKeyPenalized(clusterName, boundName, policy, client) {
 			if proxyState != nil {
 				proxyState.ReqAiKeyAffinityHit.Inc(1)
+			}
+			// Refresh TTL on hit: treat the binding as still in active use.
+			if err := client.Expire(aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix), policy.SessionAffinityTTL); err != nil {
+				log.Logger.Warn("aiKeyAffinity: refresh ttl error[%v]", err)
+				if proxyState != nil {
+					proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+				}
 			}
 			return idx, keys[idx], boundName, true
 		}

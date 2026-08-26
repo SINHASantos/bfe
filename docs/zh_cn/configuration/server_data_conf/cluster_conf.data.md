@@ -260,7 +260,7 @@
     "RetryBackoffInitial": 500,
     "RetryBackoffMax": 5000,
     "SessionAffinity": true,
-    "SessionAffinityTTL": 300,
+    "SessionAffinityTTL": 600,
     "SessionAffinityRedisPrefix": "bfe:ai:key_affinity",
     "SessionAffinityPenaltyEnable": true
 }
@@ -273,14 +273,15 @@
 | RetryBackoffInitial | integer | N | 首次重试的退避时间，单位毫秒 | >= 0 |
 | RetryBackoffMax | integer | N | 最大退避时间，单位毫秒 | >= 0，且须 >= `RetryBackoffInitial` |
 | SessionAffinity | boolean | N | 是否开启基于 Redis + `ClientKeyId` 的会话级 Key 亲和性；默认 `false` | - |
-| SessionAffinityTTL | integer | N | Redis 中 `ClientKeyId -> KeyName` 绑定的过期时间，单位秒；默认 `300` | >= 0 |
+| SessionAffinityTTL | integer | N | `ClientKeyId -> KeyName` 绑定的空闲超时时间，单位秒；命中绑定后会刷新 TTL，持续请求则绑定保持；默认 `600` | > 0 |
 | SessionAffinityRedisPrefix | string | N | Redis 绑定键的前缀；默认 `"bfe:ai:key_affinity"` | 非空 |
 | SessionAffinityPenaltyEnable | boolean | N | 是否开启 Key 惩罚：选择时跳过近期返回 429/401/403 的 Key；默认 `true` | - |
 
 **会话级 Key 亲和性说明：**
 
 - 开启后，BFE 使用 `AiBasicInfo.ClientKeyId` 作为会话标识，在 Redis 中维护 `{prefix}:{cluster_name}:{client_key_id} -> <key_name>` 的绑定。
-- 同一 `ClientKeyId` 的后续请求优先命中已绑定的 Key，从而提升 Provider 侧 prompt cache 命中率（适用于多 Key 来自不同 Provider 账户的场景）。
+- 同一 `ClientKeyId` 的后续请求优先命中已绑定的 Key；命中后会通过 `Expire` 刷新绑定 TTL，因此只要会话持续有请求，绑定就会一直保持。
+- `SessionAffinityTTL` 是**空闲超时时间**：只有当 `ClientKeyId` 在 TTL 时间内没有请求时，绑定才会自动释放。
 - 当绑定 Key 被惩罚、被删除或权重为 `0` 时，自动重新选择并写入新绑定。
 - Redis 不可用时自动降级为无亲和的加权随机选择，不影响请求成功率。
 - 若 `Keys` 中只有一个有效 Key，直接短路返回，不会访问 Redis。
@@ -544,7 +545,7 @@
                     "RetryBackoffInitial": 500,
                     "RetryBackoffMax": 5000,
                     "SessionAffinity": true,
-                    "SessionAffinityTTL": 300,
+                    "SessionAffinityTTL": 600,
                     "SessionAffinityRedisPrefix": "bfe:ai:key_affinity",
                     "SessionAffinityPenaltyEnable": true
                 },

@@ -849,10 +849,10 @@ func AIConfCheck(conf *AIConf) error {
 // AIKeyPolicyCheck checks and fills defaults for AIKeyPolicy.
 func AIKeyPolicyCheck(policy *AIKeyPolicy) error {
 	if policy.SessionAffinityTTL < 0 {
-		return fmt.Errorf("SessionAffinityTTL must be >= 0")
+		return fmt.Errorf("SessionAffinityTTL must be > 0")
 	}
 	if policy.SessionAffinityTTL == 0 {
-		policy.SessionAffinityTTL = 300
+		policy.SessionAffinityTTL = 600
 	}
 	if policy.SessionAffinityRedisPrefix == "" {
 		policy.SessionAffinityRedisPrefix = "bfe:ai:key_affinity"

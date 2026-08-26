@@ -117,14 +117,15 @@ Note: The following configuration items are located in the namespace `Config[v]`
 | AIConf.KeyPolicy.RetryBackoffInitial | Integer | Initial backoff time, in milliseconds | N | Backoff time for the first retry | >= 0 |
 | AIConf.KeyPolicy.RetryBackoffMax | Integer | Maximum backoff time, in milliseconds | N | Upper limit of backoff time | >= 0, and must be >= RetryBackoffInitial |
 | AIConf.KeyPolicy.SessionAffinity | Boolean | Whether to enable session-level API-Key affinity based on Redis + `ClientKeyId` | N | Default `false`; when enabled, requests from the same `ClientKeyId` are bound to the same API-Key | - |
-| AIConf.KeyPolicy.SessionAffinityTTL | Integer | TTL of the `ClientKeyId -> KeyName` binding in Redis, in seconds | N | Default `300` | >= 0 |
+| AIConf.KeyPolicy.SessionAffinityTTL | Integer | Idle timeout of the `ClientKeyId -> KeyName` binding in Redis, in seconds | N | Default `600`; the TTL is refreshed on each binding hit, so the binding persists as long as the session keeps sending requests | > 0 |
 | AIConf.KeyPolicy.SessionAffinityRedisPrefix | String | Prefix of the Redis binding key | N | Default `"bfe:ai:key_affinity"` | Non-empty |
 | AIConf.KeyPolicy.SessionAffinityPenaltyEnable | Boolean | Whether to enable Key penalty: skip Keys that recently returned 429/401/403 | N | Default `true` | - |
 
 **Session-level Key Affinity Notes:**
 
 - When enabled, BFE uses `AiBasicInfo.ClientKeyId` as the session identifier and maintains a binding `{prefix}:{cluster_name}:{client_key_id} -> <key_name>` in Redis.
-- Subsequent requests with the same `ClientKeyId` prefer the bound Key, which improves the upstream provider's prompt cache hit rate (especially when multiple Keys belong to different provider accounts).
+- Subsequent requests with the same `ClientKeyId` prefer the bound Key; on each hit, BFE refreshes the binding TTL via `Expire`, so the binding persists as long as the session keeps sending requests.
+- `SessionAffinityTTL` is the **idle timeout**: the binding is released automatically only when no request arrives within the TTL window.
 - If the bound Key is penalized, deleted, or has weight `0`, a new Key is selected and the binding is updated.
 - If Redis is unavailable, the affinity logic gracefully degrades to weighted random selection without affecting request success rate.
 - If `Keys` contains only one valid Key, it is returned directly without accessing Redis.
@@ -330,7 +331,7 @@ Note: The following configuration items are located in the namespace `Config[v]`
                     "RetryBackoffInitial": 500,
                     "RetryBackoffMax": 5000,
                     "SessionAffinity": true,
-                    "SessionAffinityTTL": 300,
+                    "SessionAffinityTTL": 600,
                     "SessionAffinityRedisPrefix": "bfe:ai:key_affinity",
                     "SessionAffinityPenaltyEnable": true
                 },

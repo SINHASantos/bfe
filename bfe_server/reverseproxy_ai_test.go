@@ -473,8 +473,8 @@ func TestDefaultAIKeyPolicyIncludesAffinityDefaults(t *testing.T) {
 	if policy.SessionAffinity != false {
 		t.Errorf("expected SessionAffinity false, got %v", policy.SessionAffinity)
 	}
-	if policy.SessionAffinityTTL != 300 {
-		t.Errorf("expected SessionAffinityTTL 300, got %d", policy.SessionAffinityTTL)
+	if policy.SessionAffinityTTL != 600 {
+		t.Errorf("expected SessionAffinityTTL 600, got %d", policy.SessionAffinityTTL)
 	}
 	if policy.SessionAffinityRedisPrefix != "bfe:ai:key_affinity" {
 		t.Errorf("expected SessionAffinityRedisPrefix bfe:ai:key_affinity, got %s", policy.SessionAffinityRedisPrefix)

@@ -305,8 +305,8 @@ func TestAIConfCheck(t *testing.T) {
 		if err := AIConfCheck(conf); err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
-		if conf.KeyPolicy.SessionAffinityTTL != 300 {
-			t.Errorf("expected SessionAffinityTTL default 300, got %d", conf.KeyPolicy.SessionAffinityTTL)
+		if conf.KeyPolicy.SessionAffinityTTL != 600 {
+			t.Errorf("expected SessionAffinityTTL default 600, got %d", conf.KeyPolicy.SessionAffinityTTL)
 		}
 		if conf.KeyPolicy.SessionAffinityRedisPrefix != "bfe:ai:key_affinity" {
 			t.Errorf("expected default redis prefix, got %s", conf.KeyPolicy.SessionAffinityRedisPrefix)
