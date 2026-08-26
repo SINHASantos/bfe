@@ -123,6 +123,13 @@ type ProxyState struct {
 	// sse
 	SseReqServed *metrics.Counter
 	SseReqActive *metrics.Gauge
+
+	// ai key affinity
+	ReqAiKeyAffinityHit         *metrics.Counter
+	ReqAiKeyAffinityMiss        *metrics.Counter
+	ReqAiKeyAffinityRebind      *metrics.Counter
+	ReqAiKeyAffinityPenaltySkip *metrics.Counter
+	ReqAiKeyAffinityRedisErr    *metrics.Counter
 }
 
 func (s *ProxyState) ClientConnServedInc(proto string, value uint) {

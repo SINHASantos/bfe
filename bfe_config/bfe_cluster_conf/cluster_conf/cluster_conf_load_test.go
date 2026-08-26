@@ -293,6 +293,36 @@ func TestAIConfCheck(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("key policy affinity defaults", func(t *testing.T) {
+		conf := &AIConf{
+			KeyPolicy: &AIKeyPolicy{
+				Strategy:       "weighted_random",
+				MaxRetries:     3,
+				SessionAffinity: true,
+			},
+		}
+		if err := AIConfCheck(conf); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if conf.KeyPolicy.SessionAffinityTTL != 600 {
+			t.Errorf("expected SessionAffinityTTL default 600, got %d", conf.KeyPolicy.SessionAffinityTTL)
+		}
+		if conf.KeyPolicy.SessionAffinityRedisPrefix != "bfe:ai:key_affinity" {
+			t.Errorf("expected default redis prefix, got %s", conf.KeyPolicy.SessionAffinityRedisPrefix)
+		}
+	})
+
+	t.Run("key policy negative ttl error", func(t *testing.T) {
+		conf := &AIConf{
+			KeyPolicy: &AIKeyPolicy{
+				SessionAffinityTTL: -1,
+			},
+		}
+		if err := AIConfCheck(conf); err == nil {
+			t.Error("expected error when SessionAffinityTTL < 0")
+		}
+	})
 }
 
 func TestModelTableCheck_Tiers(t *testing.T) {

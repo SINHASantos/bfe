@@ -1428,6 +1428,18 @@ func (m *mockRedisClient) GetInt64(key string) (int64, error) {
 	return 0, fmt.Errorf("key not found")
 }
 
+func (m *mockRedisClient) GetInt64Batch(keys []string) ([]int64, error) {
+	result := make([]int64, len(keys))
+	for i, key := range keys {
+		if v, ok := m.data[key]; ok {
+			result[i] = v
+		} else {
+			result[i] = 0
+		}
+	}
+	return result, nil
+}
+
 func (m *mockRedisClient) IncrBy(key string, delta int64) (int64, error) {
 	m.data[key] += delta
 	return m.data[key], nil

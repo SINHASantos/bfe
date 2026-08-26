@@ -4,6 +4,8 @@
 
 `mod_ai_rate_limit.conf` 是 `mod_ai_rate_limit` 模块的基础配置文件，用于指定限流规则文件路径、Redis 连接参数等。
 
+> 说明：自 BFE 支持 AI Key 会话级亲和性后，本文件中的 `Redis` 配置也会被复用为 `AIConf.KeyPolicy.SessionAffinity` 的存储后端。若集群开启 `SessionAffinity` 但未配置可用的 Redis，亲和能力将自动降级为加权随机选择。
+
 ## 配置描述
 
 | 配置项                     | 类型    | 参数含义                         | 必填 | 补充描述 | 合法性条件 |

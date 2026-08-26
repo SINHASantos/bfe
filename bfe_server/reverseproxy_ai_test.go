@@ -15,12 +15,16 @@
 package bfe_server
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/bfenetworks/go-lib/web-monitor/metrics"
 
 	"github.com/bfenetworks/bfe/bfe_basic"
 	"github.com/bfenetworks/bfe/bfe_config/bfe_cluster_conf/cluster_conf"
 	"github.com/bfenetworks/bfe/bfe_http"
+	"github.com/bfenetworks/bfe/bfe_util/redis_client"
 )
 
 func TestSelectTargetSingle(t *testing.T) {
@@ -379,5 +383,305 @@ func TestComputeTargetModelMappingNoMatch(t *testing.T) {
 	model := computeTargetModel("modelB", "", aiConf)
 	if model != "modelB" {
 		t.Errorf("expected modelB unchanged, got %s", model)
+	}
+}
+
+// mockRedisClient is a simple in-memory redis_client.Client for unit tests.
+type mockRedisClient struct {
+	data map[string]struct {
+		value  []byte
+		expire int
+	}
+	failGet bool
+	failSet bool
+}
+
+func newMockRedisClient() *mockRedisClient {
+	return &mockRedisClient{
+		data: make(map[string]struct {
+			value  []byte
+			expire int
+		}),
+	}
+}
+
+func (m *mockRedisClient) Setex(key string, value []byte, expire int) error {
+	if m.failSet {
+		return errors.New("redis setex failed")
+	}
+	m.data[key] = struct {
+		value  []byte
+		expire int
+	}{value: value, expire: expire}
+	return nil
+}
+
+func (m *mockRedisClient) Get(key string) (interface{}, error) {
+	if m.failGet {
+		return nil, errors.New("redis get failed")
+	}
+	v, ok := m.data[key]
+	if !ok {
+		return nil, nil
+	}
+	return v.value, nil
+}
+
+func (m *mockRedisClient) Expire(key string, expire int) error {
+	if v, ok := m.data[key]; ok {
+		v.expire = expire
+		m.data[key] = v
+	}
+	return nil
+}
+
+func (m *mockRedisClient) Incr(key string) (int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) IncrAndExpire(key string, expire int) (int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) Decr(key string) (int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) PIncr(keys []string) ([]int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) GetInt64(key string) (int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) GetInt64Batch(keys []string) ([]int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) IncrBy(key string, delta int64) (int64, error) {
+	panic("not implemented")
+}
+
+func (m *mockRedisClient) Delete(key string) error {
+	delete(m.data, key)
+	return nil
+}
+
+func (m *mockRedisClient) NewScript(src string) redis_client.RedisScript {
+	panic("not implemented")
+}
+
+func TestDefaultAIKeyPolicyIncludesAffinityDefaults(t *testing.T) {
+	policy := defaultAIKeyPolicy()
+	if policy.SessionAffinity != false {
+		t.Errorf("expected SessionAffinity false, got %v", policy.SessionAffinity)
+	}
+	if policy.SessionAffinityTTL != 600 {
+		t.Errorf("expected SessionAffinityTTL 600, got %d", policy.SessionAffinityTTL)
+	}
+	if policy.SessionAffinityRedisPrefix != "bfe:ai:key_affinity" {
+		t.Errorf("expected SessionAffinityRedisPrefix bfe:ai:key_affinity, got %s", policy.SessionAffinityRedisPrefix)
+	}
+	if policy.SessionAffinityPenaltyEnable != true {
+		t.Errorf("expected SessionAffinityPenaltyEnable true, got %v", policy.SessionAffinityPenaltyEnable)
+	}
+}
+
+func TestChooseAIKeyWithAffinity_SingleKey(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 100},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              true,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+
+	idx, key, boundName, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", nil)
+	if !ok {
+		t.Fatal("expected to select key")
+	}
+	if idx != 0 || key.Name != "key-a" {
+		t.Errorf("expected key-a, got %s", key.Name)
+	}
+	if boundName != "key-a" {
+		t.Errorf("expected bound name key-a for single key, got %s", boundName)
+	}
+	// single key should not touch redis
+	if len(client.data) != 0 {
+		t.Errorf("expected no redis access for single key, got %d entries", len(client.data))
+	}
+}
+
+func TestChooseAIKeyWithAffinity_Hit(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 50},
+		{Name: "key-b", Key: "ak-b", Weight: 50},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              true,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+	client.Setex("bfe:ai:key_affinity:cluster:session-1", []byte("key-b"), 300)
+
+	proxyState := &ProxyState{
+		ReqAiKeyAffinityHit: new(metrics.Counter),
+	}
+
+	_, key, boundName, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", proxyState)
+	if !ok {
+		t.Fatal("expected to select key")
+	}
+	if key.Name != "key-b" {
+		t.Errorf("expected key-b from binding, got %s", key.Name)
+	}
+	if boundName != "key-b" {
+		t.Errorf("expected boundName key-b, got %s", boundName)
+	}
+	if proxyState.ReqAiKeyAffinityHit.Get() != 1 {
+		t.Errorf("expected affinity hit counter 1, got %d", proxyState.ReqAiKeyAffinityHit.Get())
+	}
+}
+
+func TestChooseAIKeyWithAffinity_Miss(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 50},
+		{Name: "key-b", Key: "ak-b", Weight: 50},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              true,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+
+	proxyState := &ProxyState{
+		ReqAiKeyAffinityMiss: new(metrics.Counter),
+	}
+
+	idx, _, boundName, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", proxyState)
+	if !ok {
+		t.Fatal("expected to select key")
+	}
+	if idx < 0 || idx >= len(keys) {
+		t.Errorf("expected valid index, got %d", idx)
+	}
+	if boundName != "" {
+		t.Errorf("expected no previous binding, got %s", boundName)
+	}
+	if proxyState.ReqAiKeyAffinityMiss.Get() != 1 {
+		t.Errorf("expected affinity miss counter 1, got %d", proxyState.ReqAiKeyAffinityMiss.Get())
+	}
+	// binding should be written
+	if _, exists := client.data["bfe:ai:key_affinity:cluster:session-1"]; !exists {
+		t.Error("expected binding to be written to redis")
+	}
+}
+
+func TestChooseAIKeyWithAffinity_RedisErrFallback(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 50},
+		{Name: "key-b", Key: "ak-b", Weight: 50},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              true,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+	client.failGet = true
+
+	proxyState := &ProxyState{
+		ReqAiKeyAffinityRedisErr: new(metrics.Counter),
+	}
+
+	idx, _, _, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", proxyState)
+	if !ok {
+		t.Fatal("expected fallback to random")
+	}
+	if idx < 0 || idx >= len(keys) {
+		t.Errorf("expected valid index, got %d", idx)
+	}
+	if proxyState.ReqAiKeyAffinityRedisErr.Get() != 1 {
+		t.Errorf("expected redis err counter 1, got %d", proxyState.ReqAiKeyAffinityRedisErr.Get())
+	}
+}
+
+func TestChooseAIKeyWithAffinity_PenaltySkip(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 50},
+		{Name: "key-b", Key: "ak-b", Weight: 50},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              true,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+	client.Setex("bfe:ai:key_affinity:penalty:cluster:key-a", []byte("429"), 60)
+
+	proxyState := &ProxyState{
+		ReqAiKeyAffinityPenaltySkip: new(metrics.Counter),
+	}
+
+	// force deterministic selection: only key-b is eligible
+	_, key, _, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", proxyState)
+	if !ok {
+		t.Fatal("expected to select key")
+	}
+	if key.Name != "key-b" {
+		t.Errorf("expected key-b after penalty skip, got %s", key.Name)
+	}
+	if proxyState.ReqAiKeyAffinityPenaltySkip.Get() != 1 {
+		t.Errorf("expected penalty skip counter 1, got %d", proxyState.ReqAiKeyAffinityPenaltySkip.Get())
+	}
+}
+
+func TestChooseAIKeyWithAffinity_Disabled(t *testing.T) {
+	keys := []cluster_conf.AIKey{
+		{Name: "key-a", Key: "ak-a", Weight: 50},
+		{Name: "key-b", Key: "ak-b", Weight: 50},
+	}
+	policy := cluster_conf.AIKeyPolicy{
+		Strategy:                     "weighted_random",
+		SessionAffinity:              false,
+		SessionAffinityTTL:           300,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
+	}
+	state := newAIKeyAttemptState()
+	client := newMockRedisClient()
+
+	idx, _, boundName, ok := chooseAIKeyWithAffinity("cluster", keys, policy, state, client, "session-1", nil)
+	if !ok {
+		t.Fatal("expected to select key")
+	}
+	if idx < 0 || idx >= len(keys) {
+		t.Errorf("expected valid index, got %d", idx)
+	}
+	if boundName != "" {
+		t.Errorf("expected no binding when disabled, got %s", boundName)
+	}
+	if len(client.data) != 0 {
+		t.Errorf("expected no redis access when disabled, got %d entries", len(client.data))
 	}
 }
