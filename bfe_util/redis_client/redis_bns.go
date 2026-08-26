@@ -492,6 +492,54 @@ func (c *RedisClient) GetInt64(key string) (int64, error) {
 	return value, nil
 }
 
+// get multiple int64 values from redis by keys
+// keys are grouped by redis cluster and executed with MGET per cluster
+func (c *RedisClient) GetInt64Batch(keys []string) ([]int64, error) {
+	if len(keys) == 0 {
+		return []int64{}, nil
+	}
+
+	c.incrModuleState2(RedisGet)
+
+	// group keys by cluster id
+	groups := make(map[int][]string)
+	for _, key := range keys {
+		clusterID := c.getClusterIdByKey(key)
+		groups[clusterID] = append(groups[clusterID], key)
+	}
+
+	results := make([]int64, len(keys))
+	keyIndex := make(map[string]int, len(keys))
+	for i, key := range keys {
+		keyIndex[key] = i
+	}
+
+	procStart := time.Now()
+	for clusterID, groupKeys := range groups {
+		conn := c.getConnByClusterId(clusterID)
+
+		args := make([]interface{}, len(groupKeys))
+		for i, key := range groupKeys {
+			args[i] = key
+		}
+
+		values, err := redis.Int64s(conn.Do("MGET", args...))
+		conn.Close()
+		if err != nil {
+			c.incrModuleState2(RedisGetFail)
+			return nil, err
+		}
+
+		for i, key := range groupKeys {
+			results[keyIndex[key]] = values[i]
+		}
+	}
+
+	c.setDelayState(c.delay, procStart)
+	c.incrModuleState2(RedisGetHit)
+	return results, nil
+}
+
 // set expire to redis
 func (c *RedisClient) Expire(key string, expire int) error {
 	c.incrModuleState2(RedisExpire)

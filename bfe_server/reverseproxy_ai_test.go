@@ -455,6 +455,10 @@ func (m *mockRedisClient) GetInt64(key string) (int64, error) {
 	panic("not implemented")
 }
 
+func (m *mockRedisClient) GetInt64Batch(keys []string) ([]int64, error) {
+	panic("not implemented")
+}
+
 func (m *mockRedisClient) IncrBy(key string, delta int64) (int64, error) {
 	panic("not implemented")
 }
