@@ -61,6 +61,14 @@ var cacheStreamUsageResponse = "data: {\"choices\":[{\"delta\":{\"role\":\"assis
 	"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
 	"data: {\"usage\":{\"prompt_tokens\":8000,\"completion_tokens\":1500,\"total_tokens\":9500,\"cache_read_tokens\":5000,\"cache_write_tokens\":1000}}\n\n"
 
+var deepseekCacheUsageResponse = `{"usage":{"prompt_tokens":8000,"completion_tokens":1500,"total_tokens":9500,"prompt_cache_hit_tokens":5000}}`
+
+var deepseekCacheDetailsUsageResponse = `{"usage":{"prompt_tokens":8000,"completion_tokens":1500,"total_tokens":9500,"prompt_tokens_details":{"cached_tokens":5000}}}`
+
+var deepseekCacheStreamUsageResponse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+	"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+	"data: {\"usage\":{\"prompt_tokens\":8000,\"completion_tokens\":1500,\"total_tokens\":9500,\"prompt_cache_hit_tokens\":5000}}\n\n"
+
 // testEnv holds all resources for a single SC09 integration test.
 type testEnv struct {
 	t          *testing.T
@@ -377,6 +385,82 @@ func TestTC04_RMBQuotaDeduction_Peak_Cache_Streaming(t *testing.T) {
 	e.redis.SetQuota(redisKeyRMB, 10000000000)
 	e.backends[clusterTierPeak].ResponseHeaders = map[string]string{"Content-Type": "text/event-stream"}
 	e.backends[clusterTierPeak].Body = cacheStreamUsageResponse
+
+	resp, body, err := e.sendRequest(apiHost, cacheStreamBody)
+	if err != nil {
+		t.Fatalf("send request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		e.logBFEException()
+		t.Fatalf("expected status 200, got %d, body: %s", resp.StatusCode, body)
+	}
+
+	if e.backends[clusterTierPeak].Hits() != 1 {
+		t.Fatalf("expected 1 hit on %s, got %d", clusterTierPeak, e.backends[clusterTierPeak].Hits())
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	remaining := e.redis.GetQuota(redisKeyRMB)
+	want := int64(10000000000 - 1700000)
+	if remaining != want {
+		e.logBFEException()
+		e.logBFEAccess()
+		t.Fatalf("remaining quota = %d, want %d, response body: %s", remaining, want, body)
+	}
+}
+
+// TestTC05 verifies that the DeepSeek cache field prompt_cache_hit_tokens is correctly
+// recognized and billed using peak tier cache-aware prices for a non-streaming request.
+func TestTC05_RMBQuotaDeduction_DeepSeekCacheField_NonStreaming(t *testing.T) {
+	aiConfs := map[string]*cluster_conf.AIConf{
+		clusterTierPeak: tierPeakAIConf(),
+	}
+	e := newTestEnv(t, aiConfs)
+	defer e.Close()
+
+	e.redis.SetQuota(redisKeyRMB, 10000000000)
+	e.backends[clusterTierPeak].Body = deepseekCacheUsageResponse
+
+	resp, body, err := e.sendRequest(apiHost, cacheBody)
+	if err != nil {
+		t.Fatalf("send request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		e.logBFEException()
+		t.Fatalf("expected status 200, got %d, body: %s", resp.StatusCode, body)
+	}
+
+	if e.backends[clusterTierPeak].Hits() != 1 {
+		t.Fatalf("expected 1 hit on %s, got %d", clusterTierPeak, e.backends[clusterTierPeak].Hits())
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	remaining := e.redis.GetQuota(redisKeyRMB)
+	// normal_input = 8000 - 5000 = 3000
+	// peak: input=200, cache_read=100, output=400
+	// cost = 3000*200 + 5000*100 + 1500*400 = 1,700,000
+	want := int64(10000000000 - 1700000)
+	if remaining != want {
+		e.logBFEException()
+		e.logBFEAccess()
+		t.Fatalf("remaining quota = %d, want %d, response body: %s", remaining, want, body)
+	}
+}
+
+// TestTC06 verifies that the DeepSeek cache field prompt_tokens_details.cached_tokens is
+// correctly recognized and billed using peak tier cache-aware prices for an SSE streaming request.
+func TestTC06_RMBQuotaDeduction_DeepSeekCacheDetailsField_Streaming(t *testing.T) {
+	aiConfs := map[string]*cluster_conf.AIConf{
+		clusterTierPeak: tierPeakAIConf(),
+	}
+	e := newTestEnv(t, aiConfs)
+	defer e.Close()
+
+	e.redis.SetQuota(redisKeyRMB, 10000000000)
+	e.backends[clusterTierPeak].ResponseHeaders = map[string]string{"Content-Type": "text/event-stream"}
+	e.backends[clusterTierPeak].Body = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":8000,\"completion_tokens\":1500,\"total_tokens\":9500,\"prompt_tokens_details\":{\"cached_tokens\":5000}}}\n\n"
 
 	resp, body, err := e.sendRequest(apiHost, cacheStreamBody)
 	if err != nil {

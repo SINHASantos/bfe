@@ -15,7 +15,7 @@
 - 把 `prompt_tokens` / `completion_tokens` 换算成人民币成本；
 - 对 `unit = "RMB"` 的配额计划扣减相应金额。
 
-v0.5 进一步引入 **cache** 与 **音频 token** 子项计费：后端返回的 `usage` 中可能包含 `cache_read_tokens`、`cache_write_tokens`、`audio_input_tokens`、`audio_output_tokens`，BFE 需要把这些子项从 `prompt_tokens` / `completion_tokens` 中剥离，并按各自价格分别计费。
+v0.5 进一步引入 **cache** 与 **音频 token** 子项计费：后端返回的 `usage` 中可能包含 `cache_read_tokens`、`cache_write_tokens`、`audio_input_tokens`、`audio_output_tokens`，BFE 需要把这些子项从 `prompt_tokens` / `completion_tokens` 中剥离，并按各自价格分别计费。针对 DeepSeek 等返回 `usage.prompt_cache_hit_tokens` 或 `usage.prompt_tokens_details.cached_tokens` 的模型，BFE 也将其识别为 cache read token。
 
 v0.6 引入 **图像生成按次计费**：图像生成模型（如 `flux-2-pro`）不按 Token 计费，而是按实际生成的图像张数计费。`AIConf.ModelTable` 中新增 `output_cost_per_image` 价格字段，响应 `usage` 中新增 `image_count` 字段，BFE 按 `image_count × output_cost_per_image` 计算成本。请求路径 `/v1/images/generations` 被识别为 `image_generation` 模式，与 `chat` 模式使用独立的定价条目。
 
@@ -415,6 +415,21 @@ func (m *ModuleAITokenAuth) tokenReadResponseHandler(req *bfe_basic.Request, res
 
 因此，到请求结束阶段，`tokenUsage.PromptTokens` 和 `tokenUsage.CompletionTokens` 已经就绪，无论流式还是非流式都可以统一计算 RMB 成本。
 
+#### DeepSeek cache 字段兜底
+
+DeepSeek 在 usage 中使用与 OpenAI/Claude 不同的字段名表示缓存命中：
+
+- `usage.prompt_cache_hit_tokens`
+- `usage.prompt_tokens_details.cached_tokens`
+
+BFE 在以下三处解析中，当 `cache_read_tokens` / `cache_read_input_tokens` 为 0 时，会依次 fallback 到上述 DeepSeek 字段：
+
+- `bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`：`UpdateCtxByUsage`（非流式）
+- `bfe_modules/mod_body_process/llm_util.go`：`SSEEvent.GetQuotaUsage`（SSE 流式）
+- `bfe_modules/mod_body_process/body_process.go`：`RawEvent.GetQuotaUsage`（RawEvent 非流式）
+
+这样无论后端返回哪种字段名，`TokenUsage.CacheReadTokens` 都能被正确填充，后续 `calcChatCost` 按统一逻辑拆分计费。
+
 ### 7.5 请求结束阶段：`tokenRequestFinishHandler`
 
 `bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`
@@ -644,7 +659,7 @@ cost = image_count * output_cost_per_image
 
 在 `calcChatCost` 中，RMB 成本按如下优先级拆分：
 
-1. **Cache read 从 prompt 中剥离**：若配置了 `cache_read_input_token_cost`，则 `normal_input = prompt_tokens - cache_read_tokens`。
+1. **Cache read 从 prompt 中剥离**：若配置了 `cache_read_input_token_cost`，则 `normal_input = prompt_tokens - cache_read_tokens`。`cache_read_tokens` 除直接读取 `usage.cache_read_tokens` 外，也支持 DeepSeek 的 `usage.prompt_cache_hit_tokens` 和 `usage.prompt_tokens_details.cached_tokens` 字段。
 2. **Audio input 从剩余 normal input 中剥离**：若配置了 `input_cost_per_audio_token`，则 `audio_input_tokens` 按 audio 价格计费，其余仍按普通 input 价格计费。
 3. **Audio output 从 completion 中剥离**：若配置了 `output_cost_per_audio_token`，则 `audio_output_tokens` 按 audio 价格计费，其余仍按普通 output 价格计费。
 4. **Cache write 独立计费**：`cache_write_tokens` 不参与 prompt/completion 总量拆分，单独按 `cache_creation_input_token_cost` 计费。
@@ -982,9 +997,10 @@ return {yuan, frac}
    - 测试 fallback 场景：请求最终 fallback 到另一个 cluster，验证按最终 cluster + target_model 计费。
    - 测试流式（SSE）场景：请求体带 `stream: true`，后端返回 SSE 并在最后一个 chunk 中携带 `usage`，验证 RMB 配额仍能正确扣减。
    - 测试 cache/audio 子项计费场景：后端返回 `usage.cache_read_tokens`、`usage.cache_write_tokens`、`usage.audio_input_tokens`、`usage.audio_output_tokens`，验证成本按各子项价格拆分计算；
+   - 测试 DeepSeek cache 字段识别场景：后端返回 `usage.prompt_cache_hit_tokens` 或 `usage.prompt_tokens_details.cached_tokens`，验证 `CacheReadTokens` 被正确填充并按 `cache_read_input_token_cost` 拆分计费；
    - 测试图像生成按次计费场景：请求 `/v1/images/generations`，`ModelTable` 配置 `output_cost_per_image`，后端返回 `usage.image_count`，验证 RMB 配额按 `image_count × output_cost_per_image` 扣减，且 `total_token` 配额按 `image_count` 扣减。
    - 测试分时段计费场景：`ModelTable` 配置 `Tiers` 与 `TierPrices`；分别在北京时间高峰时段（如周一 10:00）与非高峰时段（如周一 13:00 或周六 10:00）发起请求，验证 Redis 扣减金额分别按 `TierPrices.peak` 与默认 `Prices` 计算。
-   - 测试分时段 + cache 命中组合场景：高峰时段且后端返回 `usage.cache_read_tokens`，验证缓存命中部分按 `TierPrices.peak.cache_read_input_token_cost` 计费，未命中部分按 `TierPrices.peak.input_cost_per_token` 计费。
+   - 测试分时段 + cache 命中组合场景：高峰时段且后端返回 `usage.cache_read_tokens`（或 DeepSeek 的 `usage.prompt_cache_hit_tokens` / `usage.prompt_tokens_details.cached_tokens`），验证缓存命中部分按 `TierPrices.peak.cache_read_input_token_cost` 计费，未命中部分按 `TierPrices.peak.input_cost_per_token` 计费。
 
 ## 11. 兼容性与注意事项
 

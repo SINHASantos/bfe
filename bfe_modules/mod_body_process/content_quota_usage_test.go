@@ -105,6 +105,46 @@ func TestQuotaUsageProcessorProcessWithCache(t *testing.T) {
 	}
 }
 
+func TestQuotaUsageProcessorProcessWithDeepSeekCache(t *testing.T) {
+	req := newTestRequest("AI_product")
+	ai := req.InitAiBasicInfo()
+	res := &bfe_http.Response{StatusCode: bfe_http.StatusOK}
+	p := NewQuotaUsageProcessor(req, res)
+
+	events := []Event{newRawEvent(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_cache_hit_tokens":5}}`)}
+	out, err := p.Process(events)
+	if err != nil {
+		t.Fatalf("Process failed: %s", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("expected 1 event, got %d", len(out))
+	}
+	usage := ai.GetTokenUsage()
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("expected CacheReadTokens 5, got %d", usage.CacheReadTokens)
+	}
+}
+
+func TestQuotaUsageProcessorProcessWithDeepSeekCacheDetails(t *testing.T) {
+	req := newTestRequest("AI_product")
+	ai := req.InitAiBasicInfo()
+	res := &bfe_http.Response{StatusCode: bfe_http.StatusOK}
+	p := NewQuotaUsageProcessor(req, res)
+
+	events := []Event{newRawEvent(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6}}}`)}
+	out, err := p.Process(events)
+	if err != nil {
+		t.Fatalf("Process failed: %s", err)
+	}
+	if len(out) != 1 {
+		t.Errorf("expected 1 event, got %d", len(out))
+	}
+	usage := ai.GetTokenUsage()
+	if usage.CacheReadTokens != 6 {
+		t.Errorf("expected CacheReadTokens 6, got %d", usage.CacheReadTokens)
+	}
+}
+
 func TestQuotaUsageProcessorProcessWithAudio(t *testing.T) {
 	req := newTestRequest("AI_product")
 	ai := req.InitAiBasicInfo()

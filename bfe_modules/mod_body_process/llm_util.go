@@ -134,6 +134,14 @@ func (e *SSEEvent) GetQuotaUsage() QuotaUsage {
 		imageCount = gjson.GetBytes(data, "data.#").Int()
 	}
 
+	// DeepSeek fallback: prompt_cache_hit_tokens / prompt_tokens_details.cached_tokens
+	if cacheRead == 0 {
+		cacheRead = gjson.GetBytes(data, "usage.prompt_cache_hit_tokens").Int()
+	}
+	if cacheRead == 0 {
+		cacheRead = gjson.GetBytes(data, "usage.prompt_tokens_details.cached_tokens").Int()
+	}
+
 	// Claude fallback: input_tokens / output_tokens / cache_read_input_tokens / cache_creation_input_tokens
 	if prompt == 0 && completion == 0 {
 		prompt = gjson.GetBytes(data, "usage.input_tokens").Int()
