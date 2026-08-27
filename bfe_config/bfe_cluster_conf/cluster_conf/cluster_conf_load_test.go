@@ -128,7 +128,7 @@ func TestModelTableCheck(t *testing.T) {
 				{
 					Model: "deepseek-chat",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:  0.000001,
 						PriceOutputCostPerToken: 0.000002,
 					},
@@ -160,7 +160,7 @@ func TestModelTableCheck(t *testing.T) {
 				{
 					Model: "claude-opus-4-6",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:           0.000004525,
 						PriceOutputCostPerToken:          0.000022625,
 						PriceCacheReadInputTokenCost:     0.0000004525,
@@ -191,7 +191,7 @@ func TestModelTableCheck(t *testing.T) {
 				{
 					Model: "gpt-audio-1.5",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:       0.00000178,
 						PriceOutputCostPerToken:      0.00000715,
 						PriceInputCostPerAudioToken:  0.00002288,
@@ -219,7 +219,7 @@ func TestModelTableCheck(t *testing.T) {
 		table := &ModelTable{
 			Currency: "USD",
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -231,7 +231,7 @@ func TestModelTableCheck(t *testing.T) {
 		table := &ModelTable{
 			Currency: "RMB",
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: -1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: -1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -243,8 +243,8 @@ func TestModelTableCheck(t *testing.T) {
 		table := &ModelTable{
 			Currency: "RMB",
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 2, PriceOutputCostPerToken: 2}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 2, PriceOutputCostPerToken: 2}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -256,7 +256,7 @@ func TestModelTableCheck(t *testing.T) {
 		table := &ModelTable{
 			Currency: "RMB",
 			Models: []ModelPrice{
-				{Model: "", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -343,7 +343,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{
 					Model: "m",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:  1,
 						PriceOutputCostPerToken: 1,
 					},
@@ -366,7 +366,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 			Currency: "RMB",
 			Tiers:    []PriceTier{validPeakTier},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err != nil {
@@ -383,7 +383,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 			TimeZone: "Mars/Phobos",
 			Tiers:    []PriceTier{validPeakTier},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -398,7 +398,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{Name: "off_peak", TimeRanges: []TimeRange{{Start: "00:00", End: "09:00"}}},
 			},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -411,7 +411,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 			Currency: "RMB",
 			Tiers:    []PriceTier{{Name: "", TimeRanges: []TimeRange{{Start: "00:00", End: "09:00"}}}},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -424,7 +424,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 			Currency: "RMB",
 			Tiers:    []PriceTier{{Name: "peak"}},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -439,7 +439,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{Name: "peak", TimeRanges: []TimeRange{{Weekdays: []int{7}, Start: "09:00", End: "12:00"}}},
 			},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -454,7 +454,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{Name: "peak", TimeRanges: []TimeRange{{Weekdays: []int{1}, Start: "12:00", End: "09:00"}}},
 			},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -475,7 +475,7 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				},
 			},
 			Models: []ModelPrice{
-				{Model: "m", Mode: "chat", Prices: map[string]float64{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
+				{Model: "m", Mode: "chat", Prices: PriceMap{PriceInputCostPerToken: 1, PriceOutputCostPerToken: 1}},
 			},
 		}
 		if err := ModelTableCheck(table); err == nil {
@@ -490,11 +490,11 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{
 					Model: "m",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:  1,
 						PriceOutputCostPerToken: 1,
 					},
-					TierPrices: map[string]map[string]float64{
+					TierPrices: TierPriceMap{
 						"off_peak": {PriceInputCostPerToken: 2},
 					},
 				},
@@ -512,11 +512,11 @@ func TestModelTableCheck_Tiers(t *testing.T) {
 				{
 					Model: "m",
 					Mode:  "chat",
-					Prices: map[string]float64{
+					Prices: PriceMap{
 						PriceInputCostPerToken:  1,
 						PriceOutputCostPerToken: 1,
 					},
-					TierPrices: map[string]map[string]float64{
+					TierPrices: TierPriceMap{
 						"peak": {PriceInputCostPerToken: -1},
 					},
 				},
@@ -579,11 +579,11 @@ func TestGetPriceInt(t *testing.T) {
 			{
 				Model: "m",
 				Mode:  "chat",
-				Prices: map[string]float64{
+				Prices: PriceMap{
 					PriceInputCostPerToken:  1,
 					PriceOutputCostPerToken: 2,
 				},
-				TierPrices: map[string]map[string]float64{
+				TierPrices: TierPriceMap{
 					"peak": {
 						PriceInputCostPerToken: 10,
 					},

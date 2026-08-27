@@ -358,6 +358,35 @@ func TestUpdateCtxByUsage_Cache(t *testing.T) {
 	}
 }
 
+func TestUpdateCtxByUsage_DeepSeekCache(t *testing.T) {
+	req := newTestRequest("", "AI_product")
+	ai := req.InitAiBasicInfo()
+	ctx := &TokenAuthContext{aiBasicInfo: ai}
+
+	// DeepSeek: prompt_cache_hit_tokens
+	UpdateCtxByUsage(ctx, []byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_cache_hit_tokens":5}}`))
+	usage := ai.GetTokenUsage()
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("expected CacheReadTokens 5 for prompt_cache_hit_tokens, got %d", usage.CacheReadTokens)
+	}
+
+	// DeepSeek: prompt_tokens_details.cached_tokens
+	ctx2 := &TokenAuthContext{aiBasicInfo: ai}
+	UpdateCtxByUsage(ctx2, []byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6}}}`))
+	usage = ai.GetTokenUsage()
+	if usage.CacheReadTokens != 6 {
+		t.Errorf("expected CacheReadTokens 6 for prompt_tokens_details.cached_tokens, got %d", usage.CacheReadTokens)
+	}
+
+	// Existing cache_read_tokens takes precedence when non-zero
+	ctx3 := &TokenAuthContext{aiBasicInfo: ai}
+	UpdateCtxByUsage(ctx3, []byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"cache_read_tokens":3,"prompt_cache_hit_tokens":5}}`))
+	usage = ai.GetTokenUsage()
+	if usage.CacheReadTokens != 3 {
+		t.Errorf("expected CacheReadTokens 3 (existing field precedence), got %d", usage.CacheReadTokens)
+	}
+}
+
 func TestTokenAuthContext(t *testing.T) {
 	req := newTestRequest("", "AI_product")
 	ai := req.InitAiBasicInfo()
@@ -752,7 +781,7 @@ func buildTestClusterConfWithAudio(model string, inputCost, outputCost, cacheRea
 				Model:     model,
 				BaseModel: model,
 				Mode:      "chat",
-				Prices: map[string]float64{
+				Prices: cluster_conf.PriceMap{
 					cluster_conf.PriceInputCostPerToken:           inputCost,
 					cluster_conf.PriceOutputCostPerToken:          outputCost,
 					cluster_conf.PriceCacheReadInputTokenCost:     cacheReadCost,
@@ -1565,12 +1594,12 @@ func buildTestClusterConfWithTiers(model string, inputCost, outputCost, cacheRea
 				Model:     model,
 				BaseModel: model,
 				Mode:      "chat",
-				Prices: map[string]float64{
+				Prices: cluster_conf.PriceMap{
 					cluster_conf.PriceInputCostPerToken:       inputCost,
 					cluster_conf.PriceOutputCostPerToken:      outputCost,
 					cluster_conf.PriceCacheReadInputTokenCost: cacheReadCost,
 				},
-				TierPrices: map[string]map[string]float64{
+				TierPrices: cluster_conf.TierPriceMap{
 					"peak": {
 						cluster_conf.PriceInputCostPerToken:       peakInputCost,
 						cluster_conf.PriceOutputCostPerToken:      peakOutputCost,

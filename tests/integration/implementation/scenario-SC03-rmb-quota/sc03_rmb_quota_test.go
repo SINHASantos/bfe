@@ -238,7 +238,7 @@ func defaultRMBAIConf() *cluster_conf.AIConf {
 					Limits: map[string]interface{}{
 						"context_window": 128000,
 					},
-					Prices: map[string]float64{
+					Prices: cluster_conf.PriceMap{
 						"input_cost_per_token":  0.000001,
 						"output_cost_per_token": 0.000002,
 					},
@@ -253,7 +253,7 @@ func defaultRMBAIConf() *cluster_conf.AIConf {
 					Limits: map[string]interface{}{
 						"context_window": 128000,
 					},
-					Prices: map[string]float64{
+					Prices: cluster_conf.PriceMap{
 						"input_cost_per_token":            0.00000452,
 						"output_cost_per_token":           0.00002262,
 						"cache_read_input_token_cost":     0.00000045,
@@ -270,7 +270,7 @@ func defaultRMBAIConf() *cluster_conf.AIConf {
 					Limits: map[string]interface{}{
 						"context_window": 128000,
 					},
-					Prices: map[string]float64{
+					Prices: cluster_conf.PriceMap{
 						"input_cost_per_token":        0.00000178,
 						"output_cost_per_token":       0.00000715,
 						"input_cost_per_audio_token":  0.00002288,
@@ -284,7 +284,7 @@ func defaultRMBAIConf() *cluster_conf.AIConf {
 
 func fallbackRMBAIConf() *cluster_conf.AIConf {
 	conf := defaultRMBAIConf()
-	conf.ModelTable.Models[0].Prices = map[string]float64{
+	conf.ModelTable.Models[0].Prices = cluster_conf.PriceMap{
 		"input_cost_per_token":  0.000003,
 		"output_cost_per_token": 0.000004,
 	}
@@ -303,7 +303,7 @@ func imageGenerationAIConf() *cluster_conf.AIConf {
 		Limits: map[string]interface{}{
 			"context_window": 128000,
 		},
-		Prices: map[string]float64{
+		Prices: cluster_conf.PriceMap{
 			"output_cost_per_image": 0.03,
 		},
 	})
