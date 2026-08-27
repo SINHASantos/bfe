@@ -781,7 +781,7 @@ func buildTestClusterConfWithAudio(model string, inputCost, outputCost, cacheRea
 				Model:     model,
 				BaseModel: model,
 				Mode:      "chat",
-				Prices: map[string]float64{
+				Prices: cluster_conf.PriceMap{
 					cluster_conf.PriceInputCostPerToken:           inputCost,
 					cluster_conf.PriceOutputCostPerToken:          outputCost,
 					cluster_conf.PriceCacheReadInputTokenCost:     cacheReadCost,
@@ -1594,12 +1594,12 @@ func buildTestClusterConfWithTiers(model string, inputCost, outputCost, cacheRea
 				Model:     model,
 				BaseModel: model,
 				Mode:      "chat",
-				Prices: map[string]float64{
+				Prices: cluster_conf.PriceMap{
 					cluster_conf.PriceInputCostPerToken:       inputCost,
 					cluster_conf.PriceOutputCostPerToken:      outputCost,
 					cluster_conf.PriceCacheReadInputTokenCost: cacheReadCost,
 				},
-				TierPrices: map[string]map[string]float64{
+				TierPrices: cluster_conf.TierPriceMap{
 					"peak": {
 						cluster_conf.PriceInputCostPerToken:       peakInputCost,
 						cluster_conf.PriceOutputCostPerToken:      peakOutputCost,

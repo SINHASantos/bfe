@@ -240,12 +240,12 @@ func tierPeakAIConf() *cluster_conf.AIConf {
 					Limits: map[string]interface{}{
 						"context_window": 128000,
 					},
-					Prices: map[string]float64{
+					Prices: cluster_conf.PriceMap{
 						"input_cost_per_token":        0.000001,
 						"output_cost_per_token":       0.000002,
 						"cache_read_input_token_cost": 0.0000005,
 					},
-					TierPrices: map[string]map[string]float64{
+					TierPrices: cluster_conf.TierPriceMap{
 						"peak": {
 							"input_cost_per_token":        0.000002,
 							"output_cost_per_token":       0.000004,
