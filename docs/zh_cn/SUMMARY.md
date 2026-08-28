@@ -124,6 +124,7 @@
     * [BFE 多 API-Key 支持](sys_design/multi_api_key.md)
     * [BFE AI 访问日志可观测字段设计](sys_design/ai_access_log_fields.md)
     * [AI 限流 Redis 计数器 key 稳定性设计](sys_design/ai_rate_limit_redis_key.md)
+    * [BFE AI 网关错误码说明](sys_design/ai_error_codes.md)
   * [模块开发介绍](development/module/overview.md)
     * [BFE回调机制说明](development/module/bfe_callback.md)
     * [如何开发模块](development/module/how_to_write_module.md)
