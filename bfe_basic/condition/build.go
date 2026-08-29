@@ -19,6 +19,7 @@ package condition
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -566,6 +567,34 @@ func buildPrimitive(node *parser.CallExpr) (Condition, error) {
 				path: node.Args[0].Value,
 			},
 			matcher: NewPrefixInMatcher(node.Args[1].Value, node.Args[2].ToBool()),
+		}, nil
+	case "req_body_larger_than":
+		size, err := strconv.ParseInt(node.Args[0].Value, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("req_body_larger_than: invalid size %s", node.Args[0].Value)
+		}
+		if size < 0 {
+			return nil, fmt.Errorf("req_body_larger_than: size should not be negative")
+		}
+		return &PrimitiveCond{
+			name:    node.Fun.Name,
+			node:    node,
+			fetcher: &ContentLengthFetcher{},
+			matcher: &GtInt64Matcher{threshold: size},
+		}, nil
+	case "req_body_less_than":
+		size, err := strconv.ParseInt(node.Args[0].Value, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("req_body_less_than: invalid size %s", node.Args[0].Value)
+		}
+		if size < 0 {
+			return nil, fmt.Errorf("req_body_less_than: size should not be negative")
+		}
+		return &PrimitiveCond{
+			name:    node.Fun.Name,
+			node:    node,
+			fetcher: &ContentLengthFetcher{},
+			matcher: &LtInt64Matcher{threshold: size},
 		}, nil
 
 	default:

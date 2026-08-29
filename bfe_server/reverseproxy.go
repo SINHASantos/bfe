@@ -21,8 +21,11 @@
 package bfe_server
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -46,6 +49,7 @@ import (
 	"github.com/bfenetworks/bfe/bfe_http"
 	"github.com/bfenetworks/bfe/bfe_http2"
 	"github.com/bfenetworks/bfe/bfe_module"
+	"github.com/bfenetworks/bfe/bfe_modules/mod_ai_rate_limit"
 	"github.com/bfenetworks/bfe/bfe_modules/mod_ai_token_auth"
 	"github.com/bfenetworks/bfe/bfe_modules/mod_body_process"
 	"github.com/bfenetworks/bfe/bfe_route"
@@ -53,6 +57,7 @@ import (
 	"github.com/bfenetworks/bfe/bfe_spdy"
 	"github.com/bfenetworks/bfe/bfe_util"
 	"github.com/bfenetworks/bfe/bfe_util/epp"
+	"github.com/bfenetworks/bfe/bfe_util/redis_client"
 )
 
 // TrailerPrefix is a magic prefix for ResponseWriter.Header map keys
@@ -1121,6 +1126,7 @@ func (p *ReverseProxy) ServeHTTPForAI(rw bfe_http.ResponseWriter, basicReq *bfe_
 	var attempts []aiForwardAttempt
 	var lastCluster *bfe_cluster.BfeCluster
 	var invokeErr error
+	var bodyModel string
 
 	isRedirect := false
 	resFlushInterval := time.Duration(0)
@@ -1276,6 +1282,13 @@ func (p *ReverseProxy) ServeHTTPForAI(rw bfe_http.ResponseWriter, basicReq *bfe_
 		}
 	}
 
+	// bodyModel tracks the model currently in the request body.
+	// aiMeta.ClientModel was already extracted from the request body before
+	// entering the reverse proxy, so we can use it as the initial value without
+	// parsing the body again. Only this loop modifies the body model, so we
+	// keep the value in a variable instead of parsing the body on every attempt.
+	bodyModel = aiMeta.ClientModel
+
 	for i, attempt := range attempts {
 		if i > 0 {
 			// fallback attempt: reset request state
@@ -1285,7 +1298,7 @@ func (p *ReverseProxy) ServeHTTPForAI(rw bfe_http.ResponseWriter, basicReq *bfe_
 			}
 		}
 
-		res, action, lastCluster, invokeErr = p.aiClusterInvoke(srv, serverConf, basicReq, rw, attempt, aiMeta)
+		res, action, lastCluster, invokeErr, bodyModel = p.aiClusterInvoke(srv, serverConf, basicReq, rw, attempt, aiMeta, bodyModel)
 		if invokeErr == nil && res != nil && res.StatusCode < 400 {
 			// success: 2xx/3xx, stop fallback loop
 			break
@@ -1442,14 +1455,62 @@ func stripProviderPrefix(model string, matchPrefix string) (string, bool) {
 	return stripped, true
 }
 
+// computeTargetModel calculates the final model name for a single AI forward
+// attempt. It always starts from clientModel so that fallback clusters recompute
+// from the original client value instead of inheriting the previous cluster's
+// target model. The calculation order is:
+//   1. attempt.Model override (if non-empty)
+//   2. strip provider/model prefix according to aiConf
+//   3. apply cluster model mapping according to aiConf
+func computeTargetModel(clientModel string, attemptModel string, aiConf *cluster_conf.AIConf) string {
+	targetModel := clientModel
+
+	// apply model override from ai route target/fallback
+	if attemptModel != "" {
+		targetModel = attemptModel
+	}
+
+	// strip provider/model prefix according to cluster AIConf
+	if aiConf != nil && aiConf.StripPrefix && aiConf.MatchPrefix != "" {
+		if stripped, ok := stripProviderPrefix(targetModel, aiConf.MatchPrefix); ok {
+			targetModel = stripped
+		}
+	}
+
+	// apply cluster model mapping
+	if aiConf != nil && aiConf.ModelMapping != nil && targetModel != "" {
+		if mapped, ok := (*aiConf.ModelMapping)[targetModel]; ok {
+			targetModel = mapped
+		}
+	}
+
+	return targetModel
+}
+
 // doSingleAIForward performs a single AI forward attempt with the given key.
 func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.BfeCluster,
 	basicReq *bfe_basic.Request, rw bfe_http.ResponseWriter,
 	attempt aiForwardAttempt, aiMeta *bfe_basic.AiBasicInfo,
-	selectedKey cluster_conf.AIKey) (
-	res *bfe_http.Response, action int, err error) {
+	selectedKey cluster_conf.AIKey, bodyModel string) (
+	res *bfe_http.Response, action int, err error, newBodyModel string) {
 
 	req := basicReq.HttpRequest
+
+	// Detect request protocol/auth style if not already identified.
+	if aiMeta.AuthStyle == bfe_basic.AuthStyleUnknown || aiMeta.AuthStyle == "" {
+		aiMeta.AuthStyle = bfe_basic.DetectAuthStyle(basicReq)
+	}
+
+	// Reject if the cluster provider does not support the request protocol.
+	if cluster.AIConf != nil && !clusterSupportsAuthStyle(cluster.AIConf.ModelProtocols, aiMeta.AuthStyle) {
+		err := bfe_basic.NewAiError(
+			bfe_basic.CodeProviderProtocolMismatch,
+			bfe_basic.TypeInvalidRequestError,
+			fmt.Sprintf("request protocol %s not supported by cluster provider (model_protocols=%v)",
+				aiMeta.AuthStyle, cluster.AIConf.ModelProtocols),
+		)
+		return err.CreateErrorResponse(basicReq), closeAfterReply, nil, bodyModel
+	}
 
 	// prepare out request to downstream RS backend
 	outreq := new(bfe_http.Request)
@@ -1468,33 +1529,19 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
 
 	// Calculate the final model in order: route target/fallback override ->
 	// provider/model prefix stripping -> cluster model mapping. Then write it
-	// to the request body at most once to avoid repeated JSON parsing/serialization.
-	model := aiMeta.ClientModel
-	if aiMeta.TargetModel != "" {
-		model = aiMeta.TargetModel
-	}
+	// to the request body only when it differs from the current body value.
+	// Always start from ClientModel for every cluster attempt, so fallbacks
+	// recompute the target model from the original client value.
+	targetModel := computeTargetModel(aiMeta.ClientModel, attempt.Model, cluster.AIConf)
 
-	// apply model override from ai route target/fallback
-	if attempt.Model != "" {
-		model = attempt.Model
-	}
+	// record the final target model for this cluster attempt
+	aiMeta.TargetModel = targetModel
 
-	// strip provider/model prefix according to cluster AIConf
-	if cluster.AIConf != nil && cluster.AIConf.StripPrefix && cluster.AIConf.MatchPrefix != "" {
-		if stripped, ok := stripProviderPrefix(model, cluster.AIConf.MatchPrefix); ok {
-			model = stripped
-		}
-	}
-
-	// apply cluster model mapping
-	if cluster.AIConf != nil && cluster.AIConf.ModelMapping != nil && model != "" {
-		if newModel, ok := (*cluster.AIConf.ModelMapping)[model]; ok {
-			model = newModel
-		}
-	}
-
-	if model != aiMeta.ClientModel {
-		if err := condition.ReqBodyJsonSet(basicReq, "model", model); err != nil {
+	// bodyModel is cached by the caller and updated here only when we actually
+	// change the body, so we avoid parsing the request body on every attempt.
+	newBodyModel = bodyModel
+	if targetModel != bodyModel {
+		if err := condition.ReqBodyJsonSet(basicReq, "model", targetModel); err != nil {
 			log.Logger.Warn("Failed to set model in request body: %s", err)
 		} else {
 			// outreq body already changed, need reset Content-Length
@@ -1508,7 +1555,7 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
 				basicReq.HttpRequest.ContentLength = -1
 				basicReq.HttpRequest.Header.Del("Content-Length")
 			}
-			aiMeta.TargetModel = model
+			newBodyModel = targetModel
 		}
 	}
 
@@ -1522,20 +1569,29 @@ func (p *ReverseProxy) doSingleAIForward(srv *BfeServer, cluster *bfe_cluster.Bf
 		}
 		aiMeta.AppendClusterKeyName(cluster.Name, selectedKey.Name)
 		if selectedKey.Key != "" {
-			mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key)
+			mod_ai_token_auth.SetApiKey(outreq, selectedKey.Key, aiMeta.AuthStyle)
+		}
+	}
+
+	// Inject anthropic-version for Anthropic style requests if not present.
+	if aiMeta.AuthStyle == bfe_basic.AuthStyleAnthropic {
+		if outreq.Header.Get("anthropic-version") == "" {
+			outreq.Header.Set("anthropic-version", "2023-06-01")
 		}
 	}
 
 	// invoke cluster to get response
-	return p.clusterInvoke(srv, cluster, basicReq, rw)
+	res, action, err = p.clusterInvoke(srv, cluster, basicReq, rw)
+	return res, action, err, newBodyModel
 }
 
 func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.ServerDataConf,
 	basicReq *bfe_basic.Request, rw bfe_http.ResponseWriter,
-	attempt aiForwardAttempt, aiMeta *bfe_basic.AiBasicInfo) (
-	res *bfe_http.Response, action int, cluster *bfe_cluster.BfeCluster, err error) {
+	attempt aiForwardAttempt, aiMeta *bfe_basic.AiBasicInfo, bodyModel string) (
+	res *bfe_http.Response, action int, cluster *bfe_cluster.BfeCluster, err error, newBodyModel string) {
 
 	req := basicReq.HttpRequest
+	newBodyModel = bodyModel
 
 	// update route info
 	basicReq.Route.ClusterName = attempt.ClusterName
@@ -1549,7 +1605,7 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		basicReq.ErrCode = bfe_basic.ErrBkNoCluster
 		basicReq.ErrMsg = err.Error()
 		p.proxyState.ErrBkNoCluster.Inc(1)
-		return nil, closeAfterReply, nil, err
+		return nil, closeAfterReply, nil, err, newBodyModel
 	}
 
 	// set deadline to finish read client request body
@@ -1563,8 +1619,8 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 
 	// no api keys configured, skip key injection
 	if cluster.AIConf == nil || len(cluster.AIConf.Keys) == 0 {
-		res, action, err = p.doSingleAIForward(srv, cluster, basicReq, rw, attempt, aiMeta, cluster_conf.AIKey{})
-		return res, action, cluster, err
+		res, action, err, newBodyModel = p.doSingleAIForward(srv, cluster, basicReq, rw, attempt, aiMeta, cluster_conf.AIKey{}, newBodyModel)
+		return res, action, cluster, err, newBodyModel
 	}
 
 	policy := defaultAIKeyPolicy()
@@ -1587,6 +1643,18 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 
 	state := newAIKeyAttemptState()
 
+	// session-level key affinity
+	var redisClient redis_client.Client
+	if policy.SessionAffinity && srv.Modules != nil {
+		if module := srv.Modules.GetModule(mod_ai_rate_limit.ModAiRateLimit); module != nil {
+			if m, ok := module.(*mod_ai_rate_limit.ModuleAiRateLimit); ok {
+				redisClient = m.RedisClient()
+			}
+		}
+	}
+	sessionID := clientKeySessionID(basicReq)
+	boundName := ""
+
 	var lastErr error
 	var idx int
 	var key cluster_conf.AIKey
@@ -1608,7 +1676,7 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		}
 
 		if !keepKey {
-			idx, key, ok = chooseNextAIKey(keys, state)
+			idx, key, boundName, ok = chooseAIKeyWithAffinity(cluster.Name, keys, policy, state, redisClient, sessionID, p.proxyState)
 			if !ok {
 				log.Logger.Warn("aiClusterInvoke: all ai keys exhausted for cluster[%s]", attempt.ClusterName)
 				break
@@ -1619,7 +1687,7 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		}
 		keepKey = false
 
-		res, action, err = p.doSingleAIForward(srv, cluster, basicReq, rw, attempt, aiMeta, key)
+		res, action, err, newBodyModel = p.doSingleAIForward(srv, cluster, basicReq, rw, attempt, aiMeta, key, newBodyModel)
 
 		lastErr = err
 		statusCode := 0
@@ -1629,7 +1697,15 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 
 		// success: stop key-level retry
 		if err == nil && statusCode < 400 {
-			return res, action, cluster, nil
+			if policy.SessionAffinity && redisClient != nil && sessionID != "" && key.Name != boundName {
+				if err := redisSetBinding(cluster.Name, sessionID, key.Name, policy, redisClient); err != nil {
+					log.Logger.Warn("aiClusterInvoke: redis set binding error[%v]", err)
+					p.proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+				} else {
+					p.proxyState.ReqAiKeyAffinityRebind.Inc(1)
+				}
+			}
+			return res, action, cluster, nil, newBodyModel
 		}
 
 		// classify failure
@@ -1637,10 +1713,22 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 		case statusCode == 429:
 			// rate limit: mark key as used and rotate to another key
 			state.usedSet[idx] = struct{}{}
+			if policy.SessionAffinity && policy.SessionAffinityPenaltyEnable && redisClient != nil {
+				setKeyPenalty(cluster.Name, key.Name, "429", 60, policy, redisClient)
+				if sessionID != "" {
+					redisDeleteBinding(cluster.Name, sessionID, policy, redisClient)
+				}
+			}
 			log.Logger.Info("aiClusterInvoke: ai key [name=%s] rate limited (429), rotate", key.Name)
 		case statusCode == 401 || statusCode == 402 || statusCode == 403:
 			// auth failure: mark key as dead
 			state.deadSet[idx] = struct{}{}
+			if policy.SessionAffinity && policy.SessionAffinityPenaltyEnable && redisClient != nil {
+				setKeyPenalty(cluster.Name, key.Name, fmt.Sprintf("%d", statusCode), 3600, policy, redisClient)
+				if sessionID != "" {
+					redisDeleteBinding(cluster.Name, sessionID, policy, redisClient)
+				}
+			}
 			log.Logger.Info("aiClusterInvoke: ai key [name=%s] auth failed (%d), dead", key.Name, statusCode)
 		case statusCode >= 500 || err != nil:
 			// transient server failure or connection error:
@@ -1650,11 +1738,11 @@ func (p *ReverseProxy) aiClusterInvoke(srv *BfeServer, serverConf *bfe_route.Ser
 				key.Name, statusCode, err)
 		default:
 			// other 4xx client errors (e.g. 400, 404): stop key-level retry
-			return res, action, cluster, nil
+			return res, action, cluster, nil, newBodyModel
 		}
 	}
 
-	return res, action, cluster, lastErr
+	return res, action, cluster, lastErr, newBodyModel
 }
 
 // aiFallbackStatusCodes defines the 4xx status codes that should trigger
@@ -1706,13 +1794,6 @@ func (p *ReverseProxy) resetRequestForRetry(basicReq *bfe_basic.Request) bool {
 	// rewind request body for next fallback attempt
 	if !rewindRequestBody(basicReq.HttpRequest) {
 		return false
-	}
-
-	// reset Content-Length so that the next outreq is created with a length
-	// consistent with the current (possibly modified) body.
-	if basicReq.HttpRequest.ContentLength >= 0 {
-		basicReq.HttpRequest.ContentLength = -1
-		basicReq.HttpRequest.Header.Del("Content-Length")
 	}
 
 	// clear error info from previous attempt
@@ -1869,9 +1950,213 @@ func calcBackoff(initial, max, attempt int) time.Duration {
 // defaultAIKeyPolicy returns the default key policy.
 func defaultAIKeyPolicy() cluster_conf.AIKeyPolicy {
 	return cluster_conf.AIKeyPolicy{
-		Strategy:            "weighted_random",
-		MaxRetries:          0,
-		RetryBackoffInitial: 500,
-		RetryBackoffMax:     5000,
+		Strategy:                     "weighted_random",
+		MaxRetries:                   0,
+		RetryBackoffInitial:          500,
+		RetryBackoffMax:              5000,
+		SessionAffinity:              false,
+		SessionAffinityTTL:           600,
+		SessionAffinityRedisPrefix:   "bfe:ai:key_affinity",
+		SessionAffinityPenaltyEnable: true,
 	}
+}
+
+// clientKeySessionID returns the session identifier for API-Key affinity.
+// It prefers the stable ClientKeyId; if absent, falls back to a hash of the
+// raw API-Key value.
+func clientKeySessionID(basicReq *bfe_basic.Request) string {
+	if ai := basicReq.GetAiBasicInfo(); ai != nil && ai.ClientKeyId != "" {
+		return ai.ClientKeyId
+	}
+	key := bfe_basic.GetApiKey(basicReq)
+	if key == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+// aiKeyAffinityRedisKey returns the Redis key for session->key binding.
+func aiKeyAffinityRedisKey(clusterName, sessionID, prefix string) string {
+	return fmt.Sprintf("%s:%s:%s", prefix, clusterName, sessionID)
+}
+
+// aiKeyAffinityPenaltyRedisKey returns the Redis key for key penalty.
+func aiKeyAffinityPenaltyRedisKey(clusterName, keyName, prefix string) string {
+	return fmt.Sprintf("%s:penalty:%s:%s", prefix, clusterName, keyName)
+}
+
+func redisGetBinding(clusterName, sessionID string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) (string, error) {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	val, err := client.Get(key)
+	if err != nil {
+		return "", err
+	}
+	if val == nil {
+		return "", nil
+	}
+	b, ok := val.([]byte)
+	if !ok {
+		return "", fmt.Errorf("unexpected redis value type %T", val)
+	}
+	return string(b), nil
+}
+
+func redisSetBinding(clusterName, sessionID, keyName string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) error {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	return client.Setex(key, []byte(keyName), policy.SessionAffinityTTL)
+}
+
+func redisDeleteBinding(clusterName, sessionID string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) error {
+	key := aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix)
+	return client.Delete(key)
+}
+
+func isKeyPenalized(clusterName, keyName string, policy cluster_conf.AIKeyPolicy, client redis_client.Client) bool {
+	key := aiKeyAffinityPenaltyRedisKey(clusterName, keyName, policy.SessionAffinityRedisPrefix)
+	val, err := client.Get(key)
+	if err != nil {
+		return false
+	}
+	return val != nil
+}
+
+func setKeyPenalty(clusterName, keyName, reason string, ttl int, policy cluster_conf.AIKeyPolicy, client redis_client.Client) {
+	key := aiKeyAffinityPenaltyRedisKey(clusterName, keyName, policy.SessionAffinityRedisPrefix)
+	if err := client.Setex(key, []byte(reason), ttl); err != nil {
+		log.Logger.Warn("aiKeyAffinity: set penalty error[%v]", err)
+	}
+}
+
+func filterPenaltyKeys(clusterName string, keys []cluster_conf.AIKey, policy cluster_conf.AIKeyPolicy, client redis_client.Client) ([]cluster_conf.AIKey, int) {
+	var filtered []cluster_conf.AIKey
+	skipped := 0
+	for _, k := range keys {
+		if !isKeyPenalized(clusterName, k.Name, policy, client) {
+			filtered = append(filtered, k)
+		} else {
+			skipped++
+		}
+	}
+	if len(filtered) == 0 {
+		// all keys are penalized; fallback to original list to avoid no key
+		return keys, skipped
+	}
+	return filtered, skipped
+}
+
+func findKeyIndexByName(name string, keys []cluster_conf.AIKey) int {
+	for i, k := range keys {
+		if k.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func isKeyAlive(idx int, keys []cluster_conf.AIKey, state *aiKeyAttemptState) bool {
+	if idx < 0 || idx >= len(keys) {
+		return false
+	}
+	if keys[idx].Weight == 0 {
+		return false
+	}
+	if _, dead := state.deadSet[idx]; dead {
+		return false
+	}
+	return true
+}
+
+// chooseAIKeyWithAffinity selects the next eligible AI key, optionally using
+// Redis to maintain a session-level binding from ClientKeyId to key name.
+// It returns the selected key index, the key, the bound key name (if any),
+// and whether a key was successfully selected.
+func chooseAIKeyWithAffinity(
+	clusterName string,
+	keys []cluster_conf.AIKey,
+	policy cluster_conf.AIKeyPolicy,
+	state *aiKeyAttemptState,
+	client redis_client.Client,
+	sessionID string,
+	proxyState *ProxyState,
+) (int, cluster_conf.AIKey, string, bool) {
+
+	if !policy.SessionAffinity || client == nil || sessionID == "" {
+		idx, key, ok := chooseNextAIKey(keys, state)
+		return idx, key, "", ok
+	}
+
+	// short-circuit: single valid key needs no Redis lookup/write.
+	// Treat it as already bound so the success path does not rewrite Redis.
+	if len(keys) == 1 && keys[0].Weight > 0 {
+		return 0, keys[0], keys[0].Name, true
+	}
+
+	candidateKeys := keys
+	penaltySkipCount := 0
+	if policy.SessionAffinityPenaltyEnable {
+		candidateKeys, penaltySkipCount = filterPenaltyKeys(clusterName, keys, policy, client)
+	}
+
+	boundName, err := redisGetBinding(clusterName, sessionID, policy, client)
+	if err != nil {
+		log.Logger.Warn("aiKeyAffinity: redis get binding error[%v], fallback to random", err)
+		if proxyState != nil {
+			proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+		}
+		idx, key, ok := chooseNextAIKey(candidateKeys, state)
+		return idx, key, "", ok
+	}
+
+	if boundName != "" {
+		idx := findKeyIndexByName(boundName, keys)
+		if idx >= 0 && isKeyAlive(idx, keys, state) && !isKeyPenalized(clusterName, boundName, policy, client) {
+			if proxyState != nil {
+				proxyState.ReqAiKeyAffinityHit.Inc(1)
+			}
+			// Refresh TTL on hit: treat the binding as still in active use.
+			if err := client.Expire(aiKeyAffinityRedisKey(clusterName, sessionID, policy.SessionAffinityRedisPrefix), policy.SessionAffinityTTL); err != nil {
+				log.Logger.Warn("aiKeyAffinity: refresh ttl error[%v]", err)
+				if proxyState != nil {
+					proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+				}
+			}
+			return idx, keys[idx], boundName, true
+		}
+		// binding stale (key removed/dead/penalized), continue to select a new key
+	}
+
+	idx, key, ok := chooseNextAIKey(candidateKeys, state)
+	if ok {
+		if err := redisSetBinding(clusterName, sessionID, key.Name, policy, client); err != nil {
+			log.Logger.Warn("aiKeyAffinity: redis set binding error[%v]", err)
+			if proxyState != nil {
+				proxyState.ReqAiKeyAffinityRedisErr.Inc(1)
+			}
+		}
+	}
+	if proxyState != nil {
+		if boundName == "" {
+			proxyState.ReqAiKeyAffinityMiss.Inc(1)
+		}
+		if penaltySkipCount > 0 {
+			proxyState.ReqAiKeyAffinityPenaltySkip.Inc(uint(penaltySkipCount))
+		}
+	}
+	return idx, key, boundName, ok
+}
+
+// clusterSupportsAuthStyle checks whether the cluster provider supports the
+// request protocol/auth style. An empty modelProtocols defaults to OpenAI
+// only for backward compatibility.
+func clusterSupportsAuthStyle(modelProtocols []string, authStyle string) bool {
+	if len(modelProtocols) == 0 {
+		return authStyle == bfe_basic.AuthStyleOpenAI
+	}
+	for _, mp := range modelProtocols {
+		if mp == authStyle {
+			return true
+		}
+	}
+	return false
 }

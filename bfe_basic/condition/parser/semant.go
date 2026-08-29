@@ -81,6 +81,8 @@ var funcProtos = map[string][]Token{
 	"bfe_periodic_time_range":    []Token{STRING, STRING, STRING},
 	"req_body_json_in":           []Token{STRING, STRING, BOOL},
 	"req_body_json_prefix_in":    []Token{STRING, STRING, BOOL},
+	"req_body_larger_than":       []Token{INT},
+	"req_body_less_than":         []Token{INT},
 }
 
 func prototypeCheck(expr *CallExpr) error {

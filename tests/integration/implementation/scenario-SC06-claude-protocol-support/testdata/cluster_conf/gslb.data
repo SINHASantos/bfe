@@ -1,0 +1,18 @@
+{
+    "clusters": {
+        "cluster_openai_only": {
+            "GSLB_BLACKHOLE": 0,
+            "sub_sub": 100
+        },
+        "cluster_anthropic_only": {
+            "GSLB_BLACKHOLE": 0,
+            "sub_sub": 100
+        },
+        "cluster_both_protocols": {
+            "GSLB_BLACKHOLE": 0,
+            "sub_sub": 100
+        }
+    },
+    "hostname": "gslb-test",
+    "ts": "20260720150000"
+}

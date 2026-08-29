@@ -16,6 +16,7 @@ package mod_ai_rate_limit
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -106,6 +107,28 @@ func buildRpmInstId(rule *RPMRuleConf) string {
 	return fmt.Sprintf("rpm_%d_%d_%d", rule.TimeWindow, rule.MaxRequests, rule.Burst)
 }
 
+func buildTpmRedisKey(policyId string, rule *TPMRuleConf) string {
+	if rule.RedisKey != "" {
+		// 新格式：控制面直接下发完整 Redis Key（以 default_bfe_ 开头）。
+		// 旧格式：控制面下发 suffix，需要拼接前缀。
+		if strings.HasPrefix(rule.RedisKey, "default_bfe_") {
+			return rule.RedisKey
+		}
+		return buildRedisKey(policyId, rule.RedisKey)
+	}
+	return buildRedisKey(policyId, fmt.Sprintf("tpm_%s", buildTpmInstId(rule)))
+}
+
+func buildRpmRedisKey(policyId string, rule *RPMRuleConf) string {
+	if rule.RedisKey != "" {
+		if strings.HasPrefix(rule.RedisKey, "default_bfe_") {
+			return rule.RedisKey
+		}
+		return buildRedisKey(policyId, rule.RedisKey)
+	}
+	return buildRedisKey(policyId, fmt.Sprintf("rpm_%s", buildRpmInstId(rule)))
+}
+
 func newTpmLimiterItem(limiter *limit_rate.TPMLimiter, tpmInstId string, rule *TPMRuleConf) *tpmLimiterItem {
 	return &tpmLimiterItem{
 		limiter:     limiter,
@@ -135,7 +158,10 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 
 	for _, rule := range policy.Rules.TPM {
 		tpmInstId := buildTpmInstId(rule)
-		redisKey := buildRedisKey(policyId, fmt.Sprintf("tpm_%s", tpmInstId))
+		if rule.RedisKey != "" {
+			tpmInstId = rule.RedisKey
+		}
+		redisKey := buildTpmRedisKey(policyId, rule)
 		limiter := limit_rate.NewTPMLimiter(
 			redisKey,
 			rule.Threshold,
@@ -148,7 +174,10 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 
 	for _, rule := range policy.Rules.RPM {
 		rpmInstId := buildRpmInstId(rule)
-		redisKey := buildRedisKey(policyId, fmt.Sprintf("rpm_%s", rpmInstId))
+		if rule.RedisKey != "" {
+			rpmInstId = rule.RedisKey
+		}
+		redisKey := buildRpmRedisKey(policyId, rule)
 		limiter := limit_rate.NewQPMLimiter(
 			redisKey,
 			rule.Burst,
@@ -158,7 +187,7 @@ func newPolicyLimiterSet(policyId string, policy *PolicyConf) *policyLimiterSet 
 		ps.rpmLimiters = append(ps.rpmLimiters, newRpmLimiterItem(limiter, rpmInstId, rule))
 	}
 
-	if policy.Rules.MaxConcurrency != nil {
+	if policy.Rules.MaxConcurrency != nil && *policy.Rules.MaxConcurrency > 0 {
 		redisKey := buildRedisKey(policyId, "con")
 		ps.conLimiter = &conLimiterItem{
 			conLimiter: limit_rate.NewConcurrencyLimiter(

@@ -495,7 +495,7 @@ func TestTC08_AIConfExtendedFields(t *testing.T) {
 						"max_input_tokens":  128000,
 						"max_output_tokens": 8192,
 					},
-					Prices: map[string]float64{
+					Prices: cluster_conf.PriceMap{
 						"input_cost_per_token":  0.000002,
 						"output_cost_per_token": 0.000008,
 					},

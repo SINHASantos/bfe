@@ -98,6 +98,22 @@ func TestRPMRuleConfFileConvert(t *testing.T) {
 	}
 }
 
+func TestTPMRuleConfFileConvertWithRedisKey(t *testing.T) {
+	f := &TPMRuleConfFile{WindowMinutes: 5, MaxTokens: 1000, StepMinutes: 2, RedisKey: "RL_TPM_rlp-1_0"}
+	result := f.Convert()
+	if result.RedisKey != "RL_TPM_rlp-1_0" {
+		t.Errorf("RedisKey: expected RL_TPM_rlp-1_0, got %s", result.RedisKey)
+	}
+}
+
+func TestRPMRuleConfFileConvertWithRedisKey(t *testing.T) {
+	f := &RPMRuleConfFile{WindowMinutes: 2, MaxRequests: 100, Burst: 10, RedisKey: "RL_RPM_rlp-1_0"}
+	result := f.Convert()
+	if result.RedisKey != "RL_RPM_rlp-1_0" {
+		t.Errorf("RedisKey: expected RL_RPM_rlp-1_0, got %s", result.RedisKey)
+	}
+}
+
 func TestLimitRulesConfFileConvert(t *testing.T) {
 	maxConn := int64(50)
 	f := &LimitRulesConfFile{

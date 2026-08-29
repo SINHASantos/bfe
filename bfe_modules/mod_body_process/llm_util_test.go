@@ -98,6 +98,52 @@ func TestSSEEventGetQuotaUsage(t *testing.T) {
 	}
 }
 
+func TestSSEEventGetQuotaUsageWithAudio(t *testing.T) {
+	ev := &SSEEvent{DataLines: [][]byte{[]byte(`{"usage":{"total_tokens":4500,"prompt_tokens":4000,"completion_tokens":500,"audio_input_tokens":1000,"audio_output_tokens":200}}`)}}
+	q := ev.GetQuotaUsage()
+	if q.UsedQuota != 4500 {
+		t.Errorf("expected UsedQuota 4500, got %d", q.UsedQuota)
+	}
+	if q.PromptTokens != 4000 {
+		t.Errorf("expected PromptTokens 4000, got %d", q.PromptTokens)
+	}
+	if q.CompletionTokens != 500 {
+		t.Errorf("expected CompletionTokens 500, got %d", q.CompletionTokens)
+	}
+	if q.AudioInputTokens != 1000 {
+		t.Errorf("expected AudioInputTokens 1000, got %d", q.AudioInputTokens)
+	}
+	if q.AudioOutputTokens != 200 {
+		t.Errorf("expected AudioOutputTokens 200, got %d", q.AudioOutputTokens)
+	}
+	if q.IsGuess {
+		t.Error("expected IsGuess false")
+	}
+}
+
+func TestSSEEventGetQuotaUsage_DeepSeekCache(t *testing.T) {
+	// DeepSeek: prompt_cache_hit_tokens
+	ev := &SSEEvent{DataLines: [][]byte{[]byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_cache_hit_tokens":5}}`)}}
+	usage := ev.GetQuotaUsage()
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("expected CacheReadTokens 5 for prompt_cache_hit_tokens, got %d", usage.CacheReadTokens)
+	}
+
+	// DeepSeek: prompt_tokens_details.cached_tokens
+	ev2 := &SSEEvent{DataLines: [][]byte{[]byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":6}}}`)}}
+	usage2 := ev2.GetQuotaUsage()
+	if usage2.CacheReadTokens != 6 {
+		t.Errorf("expected CacheReadTokens 6 for prompt_tokens_details.cached_tokens, got %d", usage2.CacheReadTokens)
+	}
+
+	// Existing cache_read_tokens takes precedence when non-zero
+	ev3 := &SSEEvent{DataLines: [][]byte{[]byte(`{"usage":{"total_tokens":12,"prompt_tokens":8,"completion_tokens":4,"cache_read_tokens":3,"prompt_cache_hit_tokens":5}}`)}}
+	usage3 := ev3.GetQuotaUsage()
+	if usage3.CacheReadTokens != 3 {
+		t.Errorf("expected CacheReadTokens 3 (existing field precedence), got %d", usage3.CacheReadTokens)
+	}
+}
+
 func TestSSEEventSetJsonField(t *testing.T) {
 	ev := &SSEEvent{DataLines: [][]byte{[]byte(`{"text":"hello"}`)}}
 	if err := ev.SetJsonField("text", "world"); err != nil {

@@ -16,12 +16,12 @@
             "enabled": true,
             "rules": {
                 "tpm": [
-                    {"name":"tpmabc1", "models": ["gpt-4"], "window_minutes": 1, "max_tokens": 10000, "step_minutes": 1},
-                    {"name":"tpmabc10", "models": ["*"], "window_minutes": 10, "max_tokens": 50000, "step_minutes": 1},
-                    {"name":"tpmabc60", "window_minutes": 60, "max_tokens": 200000, "step_minutes": 5}
+                    {"name":"tpmabc1", "models": ["gpt-4"], "window_minutes": 1, "max_tokens": 10000, "step_minutes": 1, "redis_key": "RL_TPM_rlp-0001_0"},
+                    {"name":"tpmabc10", "models": ["*"], "window_minutes": 10, "max_tokens": 50000, "step_minutes": 1, "redis_key": "RL_TPM_rlp-0001_1"},
+                    {"name":"tpmabc60", "window_minutes": 60, "max_tokens": 200000, "step_minutes": 5, "redis_key": "RL_TPM_rlp-0001_2"}
                 ],
                 "rpm": [
-                    {"name":"rpmabc1", "window_minutes": 1, "max_requests": 100, "burst":1}
+                    {"name":"rpmabc1", "window_minutes": 1, "max_requests": 100, "burst":1, "redis_key": "RL_RPM_rlp-0001_0"}
                 ],
                 "max_concurrency": 50
             }
@@ -31,11 +31,11 @@
             "enabled": true,
             "rules": {
                 "tpm": [
-                    {"name":"tpm1", "window_minutes": 1, "max_tokens": 200, "step_minutes": 1},
-                    {"name":"tpm2", "window_minutes": 10, "max_tokens": 10000, "step_minutes": 1}
+                    {"name":"tpm1", "window_minutes": 1, "max_tokens": 200, "step_minutes": 1, "redis_key": "RL_TPM_rlp-0002_0"},
+                    {"name":"tpm2", "window_minutes": 10, "max_tokens": 10000, "step_minutes": 1, "redis_key": "RL_TPM_rlp-0002_1"}
                 ],
                 "rpm": [
-                    {"name":"rpm1", "window_minutes": 1, "max_requests": 30, "burst":1}
+                    {"name":"rpm1", "window_minutes": 1, "max_requests": 30, "burst":1, "redis_key": "RL_RPM_rlp-0002_0"}
                 ],
                 "max_concurrency": 2
             }

@@ -40,3 +40,45 @@ req_body_json_prefix_in("model", "openrouter/anthropic/", false)
 // Match all models starting with gpt- or claude- (case-insensitive)
 req_body_json_prefix_in("model", "gpt-|claude-", true)
 ```
+
+## req_body_larger_than(size)
+
+* Meaning: Checks whether the value of the `Content-Length` request header is strictly greater than `size` (unit: bytes).
+* Parameters
+
+| Parameter | Description       |
+| --------- | ----------------- |
+| size      | Integer<br>Threshold in bytes |
+
+* Notes
+  * The data source is the HTTP `Content-Length` header, which reflects the total size of the HTTP body in bytes, not the pure prompt text length.
+  * If the request has no `Content-Length` header (e.g., chunked requests), this primitive returns `false`.
+  * Calibrate the threshold against real traffic and reserve margin for the fixed overhead of the JSON structure.
+
+* Example
+
+```go
+// Match when the request body is larger than 8KB
+req_body_larger_than(8192)
+```
+
+## req_body_less_than(size)
+
+* Meaning: Checks whether the value of the `Content-Length` request header is strictly less than `size` (unit: bytes).
+* Parameters
+
+| Parameter | Description       |
+| --------- | ----------------- |
+| size      | Integer<br>Threshold in bytes |
+
+* Notes
+  * The data source is the HTTP `Content-Length` header, which reflects the total size of the HTTP body in bytes, not the pure prompt text length.
+  * If the request has no `Content-Length` header (e.g., chunked requests), this primitive returns `false`.
+  * Calibrate the threshold against real traffic and reserve margin for the fixed overhead of the JSON structure.
+
+* Example
+
+```go
+// Match when the request body is smaller than 2KB
+req_body_less_than(2048)
+```

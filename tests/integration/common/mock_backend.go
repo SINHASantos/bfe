@@ -57,12 +57,14 @@ type MockBackend struct {
 	// request to determine the response status and body.
 	ResponseFunc func(r *http.Request, count int) (int, string)
 	// ResponseHeaders, if non-nil, is written to the response before the status code.
-	ResponseHeaders map[string]string
-	hits            int
-	mu              sync.Mutex
-	models          []string
-	bodies          [][]byte
-	authHeaders     []string
+	ResponseHeaders   map[string]string
+	hits              int
+	mu                sync.Mutex
+	models            []string
+	bodies            [][]byte
+	authHeaders       []string
+	xApiKeyHeaders    []string
+	anthropicVersions []string
 }
 
 // NewMockBackend starts a local HTTP server that returns the given status code.
@@ -102,6 +104,8 @@ func NewMockBackend(clusterName string, response int, body string) *MockBackend 
 			b.mu.Lock()
 			b.bodies = append(b.bodies, append([]byte(nil), bodyBytes...))
 			b.authHeaders = append(b.authHeaders, r.Header.Get("Authorization"))
+			b.xApiKeyHeaders = append(b.xApiKeyHeaders, r.Header.Get("x-api-key"))
+			b.anthropicVersions = append(b.anthropicVersions, r.Header.Get("anthropic-version"))
 			var reqBody map[string]interface{}
 			if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
 				if model, ok := reqBody["model"].(string); ok {
@@ -162,6 +166,20 @@ func (b *MockBackend) AuthHeaders() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]string(nil), b.authHeaders...)
+}
+
+// XApiKeyHeaders returns a deep copy of all observed x-api-key headers.
+func (b *MockBackend) XApiKeyHeaders() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.xApiKeyHeaders...)
+}
+
+// AnthropicVersions returns a deep copy of all observed anthropic-version headers.
+func (b *MockBackend) AnthropicVersions() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.anthropicVersions...)
 }
 
 // Close shuts down the mock backend.

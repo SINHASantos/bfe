@@ -39,6 +39,7 @@ type TPMRuleConfFile struct {
 	MaxTokens     int64    `json:"max_tokens"`
 	StepMinutes   int      `json:"step_minutes"`
 	Models        []string `json:"models"`
+	RedisKey      string   `json:"redis_key"`
 }
 
 type RPMRuleConfFile struct {
@@ -47,6 +48,7 @@ type RPMRuleConfFile struct {
 	MaxRequests   int64    `json:"max_requests"`
 	Burst         int64    `json:"burst"`
 	Models        []string `json:"models"`
+	RedisKey      string   `json:"redis_key"`
 }
 
 type LimitRulesConfFile struct {
@@ -87,6 +89,7 @@ type TPMRuleConf struct {
 	ReservedX        float64 // 0
 	ReservedOff      float64 // 0
 	Models           []string
+	RedisKey         string
 }
 
 type RPMRuleConf struct {
@@ -95,6 +98,7 @@ type RPMRuleConf struct {
 	MaxRequests int64 // RPMRuleConfFile.MaxRequests
 	Burst       int64 // RPMRuleConfFile.Burst
 	Models      []string
+	RedisKey    string
 }
 
 type LimitRulesConf struct {
@@ -146,6 +150,7 @@ func (f *TPMRuleConfFile) Convert() *TPMRuleConf {
 		ReservedX:        0,
 		ReservedOff:      0,
 		Models:           f.Models,
+		RedisKey:         f.RedisKey,
 	}
 }
 
@@ -156,6 +161,7 @@ func (f *RPMRuleConfFile) Convert() *RPMRuleConf {
 		MaxRequests: f.MaxRequests,
 		Burst:       f.Burst,
 		Models:      f.Models,
+		RedisKey:    f.RedisKey,
 	}
 }
 

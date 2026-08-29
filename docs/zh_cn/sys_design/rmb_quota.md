@@ -15,13 +15,20 @@
 - 把 `prompt_tokens` / `completion_tokens` 换算成人民币成本；
 - 对 `unit = "RMB"` 的配额计划扣减相应金额。
 
+v0.5 进一步引入 **cache** 与 **音频 token** 子项计费：后端返回的 `usage` 中可能包含 `cache_read_tokens`、`cache_write_tokens`、`audio_input_tokens`、`audio_output_tokens`，BFE 需要把这些子项从 `prompt_tokens` / `completion_tokens` 中剥离，并按各自价格分别计费。针对 DeepSeek 等返回 `usage.prompt_cache_hit_tokens` 或 `usage.prompt_tokens_details.cached_tokens` 的模型，BFE 也将其识别为 cache read token。
+
+v0.6 引入 **图像生成按次计费**：图像生成模型（如 `flux-2-pro`）不按 Token 计费，而是按实际生成的图像张数计费。`AIConf.ModelTable` 中新增 `output_cost_per_image` 价格字段，响应 `usage` 中新增 `image_count` 字段，BFE 按 `image_count × output_cost_per_image` 计算成本。请求路径 `/v1/images/generations` 被识别为 `image_generation` 模式，与 `chat` 模式使用独立的定价条目。
+
 ### 1.2 目标
 
 1. 配置层沿用 `AIConf.ModelTable`，价格以 `Prices` map（元/Token）下发，BFE 加载时转换为 1e-8 元/Token 定点整数；
 2. `bfe_basic.TokenUsage` 增加 `UsedCost`，用于记录本次请求的 RMB 成本；
 3. `mod_ai_token_auth.QuotaPlan` 增加 `Unit`，`Deduct` / `HasBalance` 支持 RMB；
 4. 新增共享库 `go-lib/quota`，提供 RMB 定点数转换，供 ai-gateway-api 与 BFE 共同引用；
-5. Redis Lua 支持 RMB 扣减脚本，当前暂时使用单 Key 定点数方案。
+5. Redis Lua 支持 RMB 扣减脚本，当前暂时使用单 Key 定点数方案；
+6. 支持按 `cache_read_tokens` / `cache_write_tokens` / `audio_input_tokens` / `audio_output_tokens` 子项拆分计费，并与普通 input/output 价格共存；
+7. 支持图像生成模型按 `image_count` 与 `output_cost_per_image` 计费，并按请求路径识别 `mode`；
+8. v0.5 引入 **分时段/分工作日计费**：`ModelTable` 支持 `TimeZone` 与 `Tiers` 定义，`ModelPrice` 支持 `TierPrices`，请求发生时按当前时刻匹配 tier，命中则取 tier 价格，未命中 fallback 到默认 `Prices`；**初期 tier name 只支持 `peak`**。
 
 ## 2. 设计原则
 
@@ -71,7 +78,7 @@ type ModelPrice struct {
     Capabilities        []string
     SupportedParameters []string
     Limits              map[string]interface{}
-    Prices              map[string]float64 // 价格对象，如 input_cost_per_token / output_cost_per_token
+    Prices              map[string]float64 // 价格对象，支持 input/output、cache_read/cache_creation、audio_input/audio_output、output_cost_per_image 等
     Metadata            map[string]interface{}
 }
 
@@ -84,12 +91,13 @@ type ModelTable struct {
 }
 
 type AIConf struct {
-    Type         int                // 保留字段，当前应为 0
-    ModelMapping *map[string]string // 模型映射
-    Provider     string             // provider 名
-    Keys         []AIKey            // 多 Key 模式
-    KeyPolicy    *AIKeyPolicy       // Key 选择策略
-    ModelTable   *ModelTable        // 成本定价表
+    Type           int                // 保留字段，当前应为 0
+    ModelMapping   *map[string]string // 模型映射
+    Provider       string             // provider 名
+    Keys           []AIKey            // 多 Key 模式
+    KeyPolicy      *AIKeyPolicy       // Key 选择策略
+    ModelTable     *ModelTable        // 成本定价表
+    ModelProtocols []string           // provider 支持的协议：openai / anthropic；为空默认仅 openai
 }
 ```
 
@@ -98,7 +106,7 @@ type AIConf struct {
 ### 4.3 校验规则
 
 1. `ModelTable.Currency` 当前仅允许 `"RMB"`。
-2. `ModelPrice.Prices["input_cost_per_token"]`、`Prices["output_cost_per_token"]` 必须 `>= 0`。
+2. `ModelPrice.Prices` 中 `input_cost_per_token`、`output_cost_per_token`、`cache_read_input_token_cost`、`cache_creation_input_token_cost`、`input_cost_per_audio_token`、`output_cost_per_audio_token`、`output_cost_per_image` 均必须 `>= 0`（未配置时按 `0` 处理）。
 3. `Model` 为具体模型名；`Mode` 如 `"chat"`。
 4. 同一个 `Mode` 下，`Model` 不能重复。
 5. 加载时构建二维索引 `priceIndex[model][mode]`，便于运行时 O(1) 查询。
@@ -122,11 +130,22 @@ func buildModelTableIndex(table *ModelTable) error {
         // 1. 价格转换：浮点元/Token -> 1e-8 元/Token 定点整数
         input := price.Prices["input_cost_per_token"]
         output := price.Prices["output_cost_per_token"]
-        if input < 0 || output < 0 {
+        cacheRead := price.Prices["cache_read_input_token_cost"]
+        cacheWrite := price.Prices["cache_creation_input_token_cost"]
+        audioInput := price.Prices["input_cost_per_audio_token"]
+        audioOutput := price.Prices["output_cost_per_audio_token"]
+        outputCostPerImage := price.Prices["output_cost_per_image"]
+        if input < 0 || output < 0 || cacheRead < 0 || cacheWrite < 0 ||
+            audioInput < 0 || audioOutput < 0 || outputCostPerImage < 0 {
             return fmt.Errorf("negative price for model %s", price.Model)
         }
         price.Prices["input_cost_per_token_int"] = float64(quota.RmbToFixedPoint(input))
         price.Prices["output_cost_per_token_int"] = float64(quota.RmbToFixedPoint(output))
+        price.Prices["cache_read_input_token_cost_int"] = float64(quota.RmbToFixedPoint(cacheRead))
+        price.Prices["cache_creation_input_token_cost_int"] = float64(quota.RmbToFixedPoint(cacheWrite))
+        price.Prices["input_cost_per_audio_token_int"] = float64(quota.RmbToFixedPoint(audioInput))
+        price.Prices["output_cost_per_audio_token_int"] = float64(quota.RmbToFixedPoint(audioOutput))
+        price.Prices["output_cost_per_image_int"] = float64(quota.RmbToFixedPoint(outputCostPerImage))
 
         // 2. 构建 model -> mode 二维索引
         if table.priceIndex[price.Model] == nil {
@@ -142,6 +161,69 @@ func buildModelTableIndex(table *ModelTable) error {
 > - 转换后 BFE 内部及 Redis Lua 中只使用整数，避免浮点误差。
 > - conf-agent 不感知 `unit` 类型，也不修改价格格式。
 > - `go-lib/quota` 同时被 ai-gateway-api 和 BFE 引用，保证管理面与数据面对 Redis 值的解释完全一致。
+
+### 4.5 分时段/分工作日计费配置
+
+v0.5 在 `ModelTable` 与 `ModelPrice` 中扩展分时段计费字段：
+
+```go
+type TimeRange struct {
+    Weekdays []int  // 0=周日, 1=周一 ... 6=周六；为空表示每天
+    Start    string // "HH:MM"
+    End      string // "HH:MM"，必须 > Start；跨午夜请拆成两段
+}
+
+type PriceTier struct {
+    Name       string      // 初期只支持 "peak"
+    TimeRanges []TimeRange // 命中任意一个即属于该 Tier
+}
+
+type ModelPrice struct {
+    Provider            string
+    Model               string
+    BaseModel           string
+    Mode                string
+    Capabilities        []string
+    SupportedParameters []string
+    Limits              map[string]interface{}
+    Prices              map[string]float64            // 默认价格
+    TierPrices          map[string]map[string]float64 // tier name -> 价格表
+    Metadata            map[string]interface{}
+
+    // 运行时字段：配置加载阶段预计算定点整数
+    pricesInt     map[string]int64
+    tierPricesInt map[string]map[string]int64
+}
+
+type ModelTable struct {
+    Currency string       // 仍是 "RMB"
+    TimeZone string       // 默认 "Asia/Shanghai"
+    Tiers    []PriceTier  // 时段定义
+    Models   []ModelPrice
+
+    priceIndex map[string]map[string]*ModelPrice
+    tierIndex  map[string]*PriceTier
+    tz         *time.Location
+}
+```
+
+配置归属：provider/cluster 分离后，时段模板（`time_zone`、`tiers`）由 `/providers` 维护，通过独立接口 `PUT /providers/{provider_name}/pricing-tiers` 设置；模型级分时段价格（`tier_prices`）保留在 `/model-prices`。`ai-gateway-api` 导出 BFE 配置时，把同一 provider 的时段模板与 model-prices 的价格数据拼接成 `AIConf.ModelTable`。
+
+校验规则：
+
+1. `ModelTable.TimeZone` 为空时默认 `"Asia/Shanghai"`，须为合法 IANA 时区名。
+2. `Tiers` 中每个 tier 必须包含非空 `Name` 和至少一个 `TimeRange`。
+3. **初期 `Tiers` 中 tier 的 `Name` 只支持 `"peak"`**。
+4. `TimeRange.Weekdays` 元素必须在 `0-6` 之间；为空表示每天。
+5. `TimeRange.Start` / `End` 格式为 `"HH:MM"`，且 `End` > `Start`；跨午夜需拆成两段。
+6. 同一 tier 内部 `TimeRanges` 不得重叠；不同 tier 之间允许重叠，按列表顺序匹配第一个。
+7. `TierPrices` 中 tier name **初期只支持 `"peak"`**；内部价格键名须为 `Prices` 的合法枚举键；`TierPrices` 与 `Tiers` 不做强制引用校验，未在 `Tiers` 中定义的 tier name 运行时自然无法命中。
+
+加载阶段处理：
+
+- 解析 `TimeZone` 并缓存 `*time.Location`。
+- 构建 `tierIndex[name] -> *PriceTier`，便于运行时 O(1) 查询。
+- 将 `TierPrices` 中每个 tier 的价格表同样通过 `go-lib/quota.RmbToFixedPoint` 转换为定点整数，存入 `tierPricesInt`。
 
 ## 5. 共享库 `go-lib/quota`
 
@@ -184,10 +266,15 @@ func FromRedisValue(value int64, unit string) float64
 
 ```go
 type TokenUsage struct {
-    PromptTokens     int64 // 请求侧 Token 数
-    CompletionTokens int64 // 响应侧 Token 数
-    UsedQuota        int64 // 已用 Token 配额（unit=total_token 时使用）
-    UsedCost         int64 // 已用 RMB 成本，1 单位 = 1e-8 元（unit=RMB 时使用）
+    PromptTokens      int64 // 请求侧 Token 数（包含 cache_read_tokens、audio_input_tokens）
+    CompletionTokens  int64 // 响应侧 Token 数（包含 audio_output_tokens）
+    CacheReadTokens   int64 // 从 cache 读取的 Token 数，已包含在 PromptTokens 中
+    CacheWriteTokens  int64 // 写入 cache 的 Token 数，独立附加项
+    AudioInputTokens  int64 // 音频输入 Token 数，已包含在 PromptTokens 中
+    AudioOutputTokens int64 // 音频输出 Token 数，已包含在 CompletionTokens 中
+    ImageCount        int64 // 生成的图像张数（image_generation 模式使用）
+    UsedQuota         int64 // 已用 Token 配额（unit=total_token 时使用；image_generation 模式下为 image_count）
+    UsedCost          int64 // 已用 RMB 成本，1 单位 = 1e-8 元（unit=RMB 时使用）
 }
 ```
 
@@ -201,11 +288,9 @@ type QuotaPlan struct {
     Unlimited   bool
     PassNoQuota bool
     RedisKey    string
-    CreateTime  int64
     ExpiredTime int64
     Quota       int64  // 固定点整数：total_token 时为 Token 数；RMB 时为 1e-8 元
-    ResetMode   int
-    Unit        string // 新增："total_token" 或 "RMB"
+    Unit        string // "total_token" 或 "RMB"
 }
 ```
 
@@ -266,11 +351,35 @@ func SetTokenAuthContext(req *bfe_basic.Request, tok *Token, promptToken int64, 
 }
 ```
 
-### 7.3 响应阶段：`tokenReadResponseHandler`
+### 7.3 请求 mode 识别
+
+`bfe_server/http_conn.go` 在初始化 `AiBasicInfo` 后，根据请求路径推断请求 mode：
+
+```go
+aiMeta.Mode = bfe_basic.DetectModeFromPath(request.HttpRequest.URL.Path)
+```
+
+`bfe_basic.DetectModeFromPath` 支持常见 OpenAI 风格路径：
+
+| 路径前缀 | mode |
+|----------|------|
+| `/v1/images/generations` | `image_generation` |
+| `/v1/images/edits` | `image_edit` |
+| `/v1/chat/completions` | `chat` |
+| `/v1/completions` | `completion` |
+| `/v1/embeddings` | `embedding` |
+| `/v1/audio/speech` | `audio_speech` |
+| `/v1/audio/transcriptions` | `audio_transcription` |
+| `/v1/rerank` | `rerank` |
+| 其他 | 默认 `chat` |
+
+mode 用于后续定价匹配（`(model, mode)` 二维索引）和访问日志输出。
+
+### 7.4 响应阶段：`tokenReadResponseHandler`
 
 `bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`
 
-响应阶段负责从响应体中提取 `usage`，或在未返回 `usage` 时按响应体长度估算 Token 数。对于非流式响应，`ContentLength >= 0` 时可直接读取完整响应体：
+响应阶段负责从响应体中提取 `usage`，或在未返回 `usage` 时按响应体长度估算 Token 数。对于图像生成响应，优先读取 `usage.image_count`，未返回时统计响应 `data` 数组长度，仍无则兜底请求体 `n` 字段（默认 1）。对于非流式响应，`ContentLength >= 0` 时可直接读取完整响应体：
 
 ```go
 func (m *ModuleAITokenAuth) tokenReadResponseHandler(req *bfe_basic.Request, res *bfe_http.Response) int {
@@ -294,7 +403,7 @@ func (m *ModuleAITokenAuth) tokenReadResponseHandler(req *bfe_basic.Request, res
 }
 ```
 
-> 说明：旧实现中 RMB 成本在此阶段计算，导致流式响应（`ContentLength = -1`）无法计费。当前实现已将成本计算移到请求结束阶段，见 7.4。
+> 说明：旧实现中 RMB 成本在此阶段计算，导致流式响应（`ContentLength = -1`）无法计费。当前实现已将成本计算移到请求结束阶段，见 7.5。
 
 #### 流式响应的 Token 用量收集
 
@@ -306,7 +415,22 @@ func (m *ModuleAITokenAuth) tokenReadResponseHandler(req *bfe_basic.Request, res
 
 因此，到请求结束阶段，`tokenUsage.PromptTokens` 和 `tokenUsage.CompletionTokens` 已经就绪，无论流式还是非流式都可以统一计算 RMB 成本。
 
-### 7.4 请求结束阶段：`tokenRequestFinishHandler`
+#### DeepSeek cache 字段兜底
+
+DeepSeek 在 usage 中使用与 OpenAI/Claude 不同的字段名表示缓存命中：
+
+- `usage.prompt_cache_hit_tokens`
+- `usage.prompt_tokens_details.cached_tokens`
+
+BFE 在以下三处解析中，当 `cache_read_tokens` / `cache_read_input_tokens` 为 0 时，会依次 fallback 到上述 DeepSeek 字段：
+
+- `bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`：`UpdateCtxByUsage`（非流式）
+- `bfe_modules/mod_body_process/llm_util.go`：`SSEEvent.GetQuotaUsage`（SSE 流式）
+- `bfe_modules/mod_body_process/body_process.go`：`RawEvent.GetQuotaUsage`（RawEvent 非流式）
+
+这样无论后端返回哪种字段名，`TokenUsage.CacheReadTokens` 都能被正确填充，后续 `calcChatCost` 按统一逻辑拆分计费。
+
+### 7.5 请求结束阶段：`tokenRequestFinishHandler`
 
 `bfe/bfe_modules/mod_ai_token_auth/mod_ai_token_auth.go`
 
@@ -330,7 +454,7 @@ func (m *ModuleAITokenAuth) tokenRequestFinishHandler(req *bfe_basic.Request, re
 
     // 统一在请求完成阶段计算 RMB 成本（流式由 mod_body_process 填充 token 用量）
     if tokenUsage.UsedCost <= 0 && hasRMBPlan(ctx.Token.QuotaPlans) {
-        tokenUsage.UsedCost = m.calcCostUnits(req, ctx.serverConf, tokenUsage.PromptTokens, tokenUsage.CompletionTokens)
+        tokenUsage.UsedCost = m.calcCostUnits(req, ctx.serverConf, tokenUsage)
     }
 
     costUnits := tokenUsage.UsedCost
@@ -362,19 +486,23 @@ func (m *ModuleAITokenAuth) tokenRequestFinishHandler(req *bfe_basic.Request, re
 }
 ```
 
-### 7.5 成本计算辅助方法
+### 7.6 成本计算辅助方法
 
-新增方法（位于 `mod_ai_token_auth`）：
+新增方法（位于 `mod_ai_token_auth`）。成本计算按 `AiBasicInfo.Mode` 分支：
 
 ```go
-func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe_basic.ServerDataConfInterface, promptTokens, completionTokens int64) int64 {
+func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe_basic.ServerDataConfInterface, usage *bfe_basic.TokenUsage) int64 {
     aiMeta := req.GetAiBasicInfo()
-    if aiMeta == nil {
+    if aiMeta == nil || usage == nil {
         return 0
     }
 
     clusterName := req.Route.ClusterName
     targetModel := aiMeta.TargetModel
+    mode := aiMeta.Mode
+    if mode == "" {
+        mode = bfe_basic.ModeChat
+    }
     if clusterName == "" || targetModel == "" {
         return 0
     }
@@ -388,24 +516,154 @@ func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe
         return 0
     }
 
-    entry := cluster_conf.LookupModelPrice(cluster.AIConf.ModelTable, targetModel, "chat")
+    entry := cluster_conf.LookupModelPrice(cluster.AIConf.ModelTable, targetModel, mode)
     if entry == nil {
-        log.Logger.Warn("model price not found for cluster %s model %s", clusterName, targetModel)
+        log.Logger.Warn("model price not found for cluster %s model %s mode %s", clusterName, targetModel, mode)
         return 0
     }
 
-    // 使用配置加载阶段已转换好的定点整数价格（1 单位 = 1e-8 元）
-    // 转换由 go-lib/quota.RmbToFixedPoint 统一完成
-    inputCost  := int64(entry.Prices["input_cost_per_token_int"])
-    outputCost := int64(entry.Prices["output_cost_per_token_int"])
+    switch mode {
+    case bfe_basic.ModeImageGeneration:
+        return calcImageGenerationCost(entry, usage)
+    default:
+        return calcChatCost(entry, usage)
+    }
+}
+
+func calcImageGenerationCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage) int64 {
+    imageCount := usage.ImageCount
+    if imageCount < 0 {
+        imageCount = 0
+    }
+
+    costPerImage := int64(entry.Prices[cluster_conf.PriceOutputCostPerImageInt])
+    if costPerImage < 0 {
+        log.Logger.Warn("invalid model price for image generation model %s", entry.Model)
+        return 0
+    }
+
+    return imageCount * costPerImage
+}
+
+func calcChatCost(entry *cluster_conf.ModelPrice, usage *bfe_basic.TokenUsage) int64 {
+    inputCost := int64(entry.Prices[cluster_conf.PriceInputCostPerTokenInt])
+    outputCost := int64(entry.Prices[cluster_conf.PriceOutputCostPerTokenInt])
     if inputCost < 0 || outputCost < 0 {
-        log.Logger.Warn("invalid model price for cluster %s model %s", clusterName, targetModel)
+        log.Logger.Warn("invalid model price for model %s", entry.Model)
         return 0
     }
 
-    return promptTokens*inputCost + completionTokens*outputCost
+    promptTokens := usage.PromptTokens
+    completionTokens := usage.CompletionTokens
+    cacheReadTokens := usage.CacheReadTokens
+    cacheWriteTokens := usage.CacheWriteTokens
+    audioInputTokens := usage.AudioInputTokens
+    audioOutputTokens := usage.AudioOutputTokens
+
+    // sanitize sub-token usage to avoid negative normal input/output or negative charges
+    if cacheReadTokens < 0 {
+        cacheReadTokens = 0
+    }
+    if cacheReadTokens > promptTokens {
+        cacheReadTokens = promptTokens
+    }
+    if cacheWriteTokens < 0 {
+        cacheWriteTokens = 0
+    }
+    if audioInputTokens < 0 {
+        audioInputTokens = 0
+    }
+    if audioInputTokens > promptTokens-cacheReadTokens {
+        audioInputTokens = promptTokens - cacheReadTokens
+    }
+    if audioOutputTokens < 0 {
+        audioOutputTokens = 0
+    }
+    if audioOutputTokens > completionTokens {
+        audioOutputTokens = completionTokens
+    }
+
+    cacheReadCost := int64(entry.Prices[cluster_conf.PriceCacheReadInputTokenCostInt])
+    cacheWriteCost := int64(entry.Prices[cluster_conf.PriceCacheCreationInputTokenCostInt])
+    audioInputCost := int64(entry.Prices[cluster_conf.PriceInputCostPerAudioTokenInt])
+    audioOutputCost := int64(entry.Prices[cluster_conf.PriceOutputCostPerAudioTokenInt])
+
+    normalInput := promptTokens
+    normalOutput := completionTokens
+
+    if cacheReadCost > 0 || cacheWriteCost > 0 {
+        normalInput = promptTokens - cacheReadTokens
+        if normalInput < 0 {
+            normalInput = 0
+        }
+    }
+
+    if audioInputCost > 0 {
+        if audioInputTokens > normalInput {
+            audioInputTokens = normalInput
+        }
+        normalInput = normalInput - audioInputTokens
+        if normalInput < 0 {
+            normalInput = 0
+        }
+    } else {
+        audioInputTokens = 0
+    }
+
+    if audioOutputCost > 0 {
+        if audioOutputTokens > completionTokens {
+            audioOutputTokens = completionTokens
+        }
+        normalOutput = completionTokens - audioOutputTokens
+        if normalOutput < 0 {
+            normalOutput = 0
+        }
+    } else {
+        audioOutputTokens = 0
+    }
+
+    var cost int64
+    if cacheReadCost > 0 || cacheWriteCost > 0 || audioInputCost > 0 || audioOutputCost > 0 {
+        cost = normalInput*inputCost +
+            cacheReadTokens*cacheReadCost +
+            cacheWriteTokens*cacheWriteCost +
+            audioInputTokens*audioInputCost +
+            normalOutput*outputCost +
+            audioOutputTokens*audioOutputCost
+    } else {
+        cost = promptTokens*inputCost + completionTokens*outputCost
+    }
+
+    return cost
 }
 ```
+
+#### 图像生成计费公式
+
+`image_generation` 模式下成本仅与图像张数相关：
+
+```
+image_count = usage.image_count
+            ?? len(response.data)
+            ?? request.n
+            ?? 1
+
+cost = image_count * output_cost_per_image
+```
+
+- 优先读取响应 `usage.image_count`；
+- 未返回时统计响应 `data` 数组长度（OpenAI 风格图像生成响应）；
+- 仍无则兜底读取请求体 `n` 字段，未传时默认 `1`。
+
+#### chat 模式 cache/audio 计费拆分公式
+
+在 `calcChatCost` 中，RMB 成本按如下优先级拆分：
+
+1. **Cache read 从 prompt 中剥离**：若配置了 `cache_read_input_token_cost`，则 `normal_input = prompt_tokens - cache_read_tokens`。`cache_read_tokens` 除直接读取 `usage.cache_read_tokens` 外，也支持 DeepSeek 的 `usage.prompt_cache_hit_tokens` 和 `usage.prompt_tokens_details.cached_tokens` 字段。
+2. **Audio input 从剩余 normal input 中剥离**：若配置了 `input_cost_per_audio_token`，则 `audio_input_tokens` 按 audio 价格计费，其余仍按普通 input 价格计费。
+3. **Audio output 从 completion 中剥离**：若配置了 `output_cost_per_audio_token`，则 `audio_output_tokens` 按 audio 价格计费，其余仍按普通 output 价格计费。
+4. **Cache write 独立计费**：`cache_write_tokens` 不参与 prompt/completion 总量拆分，单独按 `cache_creation_input_token_cost` 计费。
+5. **未配置子项价格时回退**：若某类子项价格未配置（`<= 0`），对应子项仍按普通 input/output 价格计费，保证向后兼容。
 
 说明：
 
@@ -414,7 +672,7 @@ func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe
 - 因此这里拿到的 `clusterName` 和 `targetModel` 就是计费所需的实际值。
 - 价格到定点整数的转换在配置加载阶段通过 `go-lib/quota` 完成，运行时 `calcCostUnits` 只处理整数，保证 Redis Lua 不接触浮点。
 
-### 7.6 定价匹配逻辑
+### 7.7 定价匹配逻辑
 
 ```go
 func lookupModelPrice(table *cluster_conf.ModelTable, model, mode string) *cluster_conf.ModelPrice {
@@ -429,7 +687,76 @@ func lookupModelPrice(table *cluster_conf.ModelTable, model, mode string) *clust
 }
 ```
 
-索引在配置加载阶段构建，运行时按 `(model, mode)` 精确查询，为 O(1)。未命中时返回 `nil`，由调用方决定是否按 `0` 成本处理。
+索引在配置加载阶段构建，运行时按 `(model, mode)` 精确查询，为 O(1)。`mode` 由请求路径推断（如 `/v1/images/generations` → `image_generation`，`/v1/chat/completions` → `chat`），未识别时默认 `chat`。未命中时返回 `nil`，由调用方决定是否按 `0` 成本处理。
+
+### 7.8 分时段计费运行时匹配
+
+`ModelTable` 在运行时根据请求发生时刻（取 BFE 本地时间，按 `TimeZone` 转换）匹配活跃 tier：
+
+```go
+func (table *ModelTable) ActiveTierName(now time.Time) string {
+    if table == nil || len(table.Tiers) == 0 {
+        return ""
+    }
+    t := now.In(table.tz)
+    wd := int(t.Weekday())
+    hour, min := t.Hour(), t.Minute()
+    cur := hour*60 + min
+
+    for i := range table.Tiers {
+        tier := &table.Tiers[i]
+        for _, tr := range tier.TimeRanges {
+            if len(tr.Weekdays) > 0 && !containsInt(tr.Weekdays, wd) {
+                continue
+            }
+            start := parseHHMM(tr.Start)
+            end := parseHHMM(tr.End)
+            if start <= cur && cur < end {
+                return tier.Name
+            }
+        }
+    }
+    return ""
+}
+
+func (p *ModelPrice) GetPriceInt(tier, key string) int64 {
+    if tier != "" && p.tierPricesInt != nil {
+        if tierMap, ok := p.tierPricesInt[tier]; ok {
+            if v, ok := tierMap[key]; ok {
+                return v
+            }
+        }
+    }
+    if p.pricesInt != nil {
+        return p.pricesInt[key]
+    }
+    return 0
+}
+```
+
+`calcCostUnits` 在计算成本前先调用 `ActiveTierName`，再按 tier 取价。以 `chat` 模式为例，`calcChatCost` 在读取 `inputCost`、`outputCost`、`cacheReadCost` 等定点整数价格时，均通过 `GetPriceInt(tierName, key)` 获取：命中 `peak` tier 且 `TierPrices.peak` 中配置了该键，则使用 tier 价格；否则 fallback 到默认 `Prices`。
+
+```go
+func (m *ModuleAITokenAuth) calcCostUnits(req *bfe_basic.Request, serverConf bfe_basic.ServerDataConfInterface, usage *bfe_basic.TokenUsage) int64 {
+    // ... 查找 entry ...
+
+    tierName := cluster.AIConf.ModelTable.ActiveTierName(time.Now())
+
+    inputCost := entry.GetPriceInt(tierName, cluster_conf.PriceInputCostPerTokenInt)
+    outputCost := entry.GetPriceInt(tierName, cluster_conf.PriceOutputCostPerTokenInt)
+    cacheReadCost := entry.GetPriceInt(tierName, cluster_conf.PriceCacheReadInputTokenCostInt)
+    // ... 其他子项价格同样按 tierName 获取 ...
+
+    // 后续 cache/audio 拆分与 7.6 节一致
+}
+```
+
+计费规则：
+
+- 命中 `peak` tier：所有价格优先取 `TierPrices.peak`；若某键未配置，fallback 到默认 `Prices`。
+- 未命中任何 tier：全部使用默认 `Prices`，行为与 v0.4 完全一致。
+- `Tiers` 为空或 `TierPrices` 为空：直接退化到固定价格逻辑。
+- 区间采用左闭右开 `[Start, End)`，例如 `18:00` 不命中 `09:00-18:00`。
 
 ## 8. Redis Lua 脚本改造
 
@@ -560,7 +887,25 @@ return {yuan, frac}
                     },
                     "Prices": {
                         "input_cost_per_token": 0.000001,
-                        "output_cost_per_token": 0.000002
+                        "output_cost_per_token": 0.000002,
+                        "cache_read_input_token_cost": 0.0000005,
+                        "cache_creation_input_token_cost": 0.0000015,
+                        "input_cost_per_audio_token": 0.00002,
+                        "output_cost_per_audio_token": 0.00004
+                    }
+                },
+                {
+                    "Provider": "mock-provider",
+                    "Model": "flux-2-pro",
+                    "BaseModel": "flux-2-pro",
+                    "Mode": "image_generation",
+                    "Capabilities": ["image_generation"],
+                    "SupportedParameters": ["prompt", "n", "size"],
+                    "Limits": {
+                        "context_window": 128000
+                    },
+                    "Prices": {
+                        "output_cost_per_image": 0.03
                     }
                 }
             ]
@@ -569,14 +914,78 @@ return {yuan, frac}
 }
 ```
 
-> 上例中 `input_cost_per_token = 0.000001` 元/Token，换算为固定点整数即 `100`（= 0.000001 * 1e8），表示 **0.1 元 / 百万 Token**。
+> 上例中 `input_cost_per_token = 0.000001` 元/Token，换算为固定点整数即 `100`（= 0.000001 * 1e8），表示 **0.1 元 / 百万 Token**；`cache_read_input_token_cost` 等子项价格同样通过 `quota.RmbToFixedPoint` 转换为定点整数；`output_cost_per_image = 0.03` 元/张，换算为定点整数 `3000000`。
+
+### 9.2 分时段计费配置示例（DeepSeek）
+
+以 DeepSeek-V4-Pro 为例，北京时间周一至周五 `09:00-12:00`、`14:00-18:00` 为高峰时段，其余时间（含工作日非高峰及周末）为空闲时段；空闲价格为高峰价格的一半：
+
+```json
+{
+    "AIConf": {
+        "Type": 0,
+        "Provider": "deepseek",
+        "ModelTable": {
+            "Currency": "RMB",
+            "TimeZone": "Asia/Shanghai",
+            "Tiers": [
+                {
+                    "Name": "peak",
+                    "TimeRanges": [
+                        { "Weekdays": [1, 2, 3, 4, 5], "Start": "09:00", "End": "12:00" },
+                        { "Weekdays": [1, 2, 3, 4, 5], "Start": "14:00", "End": "18:00" }
+                    ]
+                }
+            ],
+            "Models": [
+                {
+                    "Provider": "deepseek",
+                    "Model": "deepseek-v4-pro",
+                    "BaseModel": "deepseek-v4-pro",
+                    "Mode": "chat",
+                    "Capabilities": ["chat", "reasoning", "tools", "prompt_caching"],
+                    "SupportedParameters": ["temperature", "max_tokens"],
+                    "Limits": {
+                        "context_window": 128000,
+                        "max_input_tokens": 128000,
+                        "max_output_tokens": 8192
+                    },
+                    "Prices": {
+                        "input_cost_per_token": 4.5e-06,
+                        "output_cost_per_token": 1.35e-05,
+                        "cache_read_input_token_cost": 1.5e-07
+                    },
+                    "TierPrices": {
+                        "peak": {
+                            "input_cost_per_token": 9.0e-06,
+                            "output_cost_per_token": 2.7e-05,
+                            "cache_read_input_token_cost": 3.0e-07
+                        }
+                    }
+                }
+            ]
+        }
+    }
+}
+```
+
+> 说明：
+> - 本示例只定义 `peak` tier；未命中高峰时段时，`calcChatCost` 自动使用默认 `Prices`（即空闲价格）。
+> - `TierPrices.peak` 中未配置的键将 fallback 到 `Prices` 中的对应键。
+> - 若后续需要把周末等时段单独定价，可新增 tier 并通过 `Weekdays` 指定，无需修改计费逻辑。
 
 ## 10. 测试建议
 
 1. **单元测试**
    - `QuotaPlan.Deduct`：分别覆盖 `total_token` 和 `RMB` 两种单位，以及余额不足、Key 不存在等边界。
    - `lookupModelPrice`：精确匹配、未命中返回 nil。
-   - `calcCostUnits`：正常计算、ModelTable 缺失、模型未命中、价格转换精度。
+   - `calcCostUnits`：正常计算、ModelTable 缺失、模型未命中、价格转换精度；
+     - 覆盖 cache read/write 与 audio input/output 子项拆分；
+     - 覆盖子项用量大于总量时的 clamp 行为；
+     - 覆盖未配置子项价格时回退到普通 input/output 价格的行为；
+     - 覆盖 `image_generation` 模式按 `image_count × output_cost_per_image` 计费，以及未配置 `output_cost_per_image` 时按 0 成本处理。
+   - `ActiveTierName`：验证北京时区周一 10:00 命中 `peak`、周一 13:00 未命中、周六 10:00 未命中、周一 18:00 不命中（左闭右开）。
+   - `GetPriceInt`：验证命中 `peak` 时取 `TierPrices.peak`、未命中时 fallback 到 `Prices`、tier 中未配置某键时 fallback 到默认价格。
 
 2. **Lua 脚本测试**
    - 单 Key 定点数方案：验证扣减、余额归零、负数不溢出。
@@ -587,6 +996,11 @@ return {yuan, frac}
    - 测试 `ModelMapping` 场景：请求模型是 `gpt-4`，实际后端模型是 `deepseek-chat`，验证按 `deepseek-chat` 的价格计费。
    - 测试 fallback 场景：请求最终 fallback 到另一个 cluster，验证按最终 cluster + target_model 计费。
    - 测试流式（SSE）场景：请求体带 `stream: true`，后端返回 SSE 并在最后一个 chunk 中携带 `usage`，验证 RMB 配额仍能正确扣减。
+   - 测试 cache/audio 子项计费场景：后端返回 `usage.cache_read_tokens`、`usage.cache_write_tokens`、`usage.audio_input_tokens`、`usage.audio_output_tokens`，验证成本按各子项价格拆分计算；
+   - 测试 DeepSeek cache 字段识别场景：后端返回 `usage.prompt_cache_hit_tokens` 或 `usage.prompt_tokens_details.cached_tokens`，验证 `CacheReadTokens` 被正确填充并按 `cache_read_input_token_cost` 拆分计费；
+   - 测试图像生成按次计费场景：请求 `/v1/images/generations`，`ModelTable` 配置 `output_cost_per_image`，后端返回 `usage.image_count`，验证 RMB 配额按 `image_count × output_cost_per_image` 扣减，且 `total_token` 配额按 `image_count` 扣减。
+   - 测试分时段计费场景：`ModelTable` 配置 `Tiers` 与 `TierPrices`；分别在北京时间高峰时段（如周一 10:00）与非高峰时段（如周一 13:00 或周六 10:00）发起请求，验证 Redis 扣减金额分别按 `TierPrices.peak` 与默认 `Prices` 计算。
+   - 测试分时段 + cache 命中组合场景：高峰时段且后端返回 `usage.cache_read_tokens`（或 DeepSeek 的 `usage.prompt_cache_hit_tokens` / `usage.prompt_tokens_details.cached_tokens`），验证缓存命中部分按 `TierPrices.peak.cache_read_input_token_cost` 计费，未命中部分按 `TierPrices.peak.input_cost_per_token` 计费。
 
 ## 11. 兼容性与注意事项
 
@@ -597,6 +1011,7 @@ return {yuan, frac}
    - 本次请求不对该 RMB 配额进行扣减（相当于按 `0` 成本处理）；
    - 具体是否拒绝请求，需产品进一步确认。
 4. **与多 Key 改造的关系**：`AIConf.Keys` 与 `ModelTable` 相互独立，可并行下发、独立解析。
-5. **流式响应计费**：RMB 成本在请求结束阶段计算，依赖 `mod_body_process`（或其他响应处理模块）在流式传输过程中填充 `PromptTokens` / `CompletionTokens`。生产环境若启用流式计费，需确保 `mod_body_process` 已加载。
+5. **流式响应计费**：RMB 成本在请求结束阶段计算，依赖 `mod_body_process`（或其他响应处理模块）在流式传输过程中填充 `PromptTokens` / `CompletionTokens` / `CacheReadTokens` / `CacheWriteTokens` / `AudioInputTokens` / `AudioOutputTokens` / `ImageCount`。生产环境若启用流式计费，需确保 `mod_body_process` 已加载。
 6. **模块顺序建议**：`mod_ai_token_auth` 的 `HandleReadResponse` 不再负责 RMB 成本计算，因此对模块加载顺序的敏感度降低；但仍建议保持 `mod_ai_token_auth` 在 `mod_body_process` 之前注册，以便非流式场景下 token 用量解析逻辑保持一致。
 7. **旧字段清理**：`AIConf.Key` 已移除，统一使用 `AIConf.Keys`。
+8. **分时段计费向后兼容**：`ModelTable.Tiers` / `ModelPrice.TierPrices` 均为可选字段；未配置时行为与固定价格完全一致。命中 tier 但该 tier 未配置某个价格键时，自动 fallback 到默认 `Prices`。

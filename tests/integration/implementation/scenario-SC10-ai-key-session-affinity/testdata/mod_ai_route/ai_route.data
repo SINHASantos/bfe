@@ -1,0 +1,31 @@
+{
+    "Version": "20260720150000",
+    "route_rules": {
+        "apikey_ak_session_affinity": {
+            "type": "apikey",
+            "owner": "ak_session_affinity",
+            "rules": [
+                {
+                    "name": "session-affinity-default",
+                    "Cond": "default_t()",
+                    "targets": [
+                        {
+                            "ClusterName": "cluster_session_affinity",
+                            "Model": "",
+                            "Weight": 100
+                        }
+                    ],
+                    "fallbacks": []
+                }
+            ]
+        }
+    },
+    "ApikeyRouteTableBindings": {
+        "ak_session_affinity": [
+            "apikey_ak_session_affinity"
+        ],
+        "ak_session_affinity_2": [
+            "apikey_ak_session_affinity"
+        ]
+    }
+}

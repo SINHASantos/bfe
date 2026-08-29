@@ -58,6 +58,38 @@ func TestBuildRpmInstIdWithoutName(t *testing.T) {
 	}
 }
 
+func TestBuildTpmRedisKeyWithRedisKey(t *testing.T) {
+	rule := &TPMRuleConf{Name: "abc", RedisKey: "RL_TPM_rlp-1_0", TimeWindow: 300, Threshold: 1000, BucketTimeWindow: 60, BucketThreshold: 1000}
+	want := "default_bfe_policy1_RL_TPM_rlp-1_0"
+	if got := buildTpmRedisKey("policy1", rule); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+func TestBuildTpmRedisKeyFallbackToName(t *testing.T) {
+	rule := &TPMRuleConf{Name: "abc", TimeWindow: 300, Threshold: 1000, BucketTimeWindow: 60, BucketThreshold: 1000}
+	want := "default_bfe_policy1_tpm_abc"
+	if got := buildTpmRedisKey("policy1", rule); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+func TestBuildRpmRedisKeyWithRedisKey(t *testing.T) {
+	rule := &RPMRuleConf{Name: "abc", RedisKey: "RL_RPM_rlp-1_0", TimeWindow: 120, MaxRequests: 100, Burst: 10}
+	want := "default_bfe_policy1_RL_RPM_rlp-1_0"
+	if got := buildRpmRedisKey("policy1", rule); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
+func TestBuildRpmRedisKeyFallbackToName(t *testing.T) {
+	rule := &RPMRuleConf{Name: "abc", TimeWindow: 120, MaxRequests: 100, Burst: 10}
+	want := "default_bfe_policy1_rpm_abc"
+	if got := buildRpmRedisKey("policy1", rule); got != want {
+		t.Errorf("expected %s, got %s", want, got)
+	}
+}
+
 func TestPredictTokenUsage(t *testing.T) {
 	item := &tpmLimiterItem{ReservedX: 2.0, ReservedOff: 10.0}
 	if got := item.predictTokenUsage(5); got != 20 {
@@ -178,6 +210,50 @@ func TestNewPolicyLimiterSetEmptyRules(t *testing.T) {
 	}
 	if len(ps.tpmLimiters) != 0 || len(ps.rpmLimiters) != 0 || ps.conLimiter != nil {
 		t.Error("expected empty limiter set when Rules is nil")
+	}
+}
+
+func TestNewPolicyLimiterSetIgnoresZeroConcurrency(t *testing.T) {
+	zero := int64(0)
+	ps := newPolicyLimiterSet("rlp-zero-con", &PolicyConf{
+		Name:    "test",
+		Enabled: true,
+		Rules: &LimitRulesConf{
+			MaxConcurrency: &zero,
+			RPM: []*RPMRuleConf{
+				{Name: "rpm1", TimeWindow: 60, MaxRequests: 100, Burst: 1},
+			},
+		},
+	})
+	if ps.conLimiter != nil {
+		t.Error("expected no concurrency limiter when MaxConcurrency is 0")
+	}
+}
+
+func TestNewPolicyLimiterSetUsesRedisKeyAsName(t *testing.T) {
+	ps := newPolicyLimiterSet("rlp-0001", &PolicyConf{
+		Name:    "test",
+		Enabled: true,
+		Rules: &LimitRulesConf{
+			TPM: []*TPMRuleConf{
+				{Name: "tpm1", RedisKey: "RL_TPM_rlp-0001_0", TimeWindow: 60, Threshold: 1000, BucketTimeWindow: 60, BucketThreshold: 1000},
+			},
+			RPM: []*RPMRuleConf{
+				{Name: "rpm1", RedisKey: "RL_RPM_rlp-0001_0", TimeWindow: 60, MaxRequests: 100, Burst: 1},
+			},
+		},
+	})
+	if len(ps.tpmLimiters) != 1 {
+		t.Fatalf("expected 1 tpm limiter, got %d", len(ps.tpmLimiters))
+	}
+	if ps.tpmLimiters[0].name != "RL_TPM_rlp-0001_0" {
+		t.Errorf("expected tpm limiter name RL_TPM_rlp-0001_0, got %s", ps.tpmLimiters[0].name)
+	}
+	if len(ps.rpmLimiters) != 1 {
+		t.Fatalf("expected 1 rpm limiter, got %d", len(ps.rpmLimiters))
+	}
+	if ps.rpmLimiters[0].name != "RL_RPM_rlp-0001_0" {
+		t.Errorf("expected rpm limiter name RL_RPM_rlp-0001_0, got %s", ps.rpmLimiters[0].name)
 	}
 }
 
