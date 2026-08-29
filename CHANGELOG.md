@@ -10,6 +10,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.8.6] - 2026-08-29
+
+### Added
+- Support Anthropic Claude protocol forwarding with model protocol matching ([Pull #1331](https://github.com/bfenetworks/bfe/pull/1331))
+- Support RMB tiered pricing with peak/off-peak tiers ([Pull #1335](https://github.com/bfenetworks/bfe/pull/1335))
+- Support cache token billing for AI requests ([Pull #1330](https://github.com/bfenetworks/bfe/pull/1330))
+- Support audio token RMB billing ([Pull #1331](https://github.com/bfenetworks/bfe/pull/1331))
+- Support image generation per-image billing ([Pull #1331](https://github.com/bfenetworks/bfe/pull/1331))
+- Recognize DeepSeek cache fields in usage parsing ([Pull #1337](https://github.com/bfenetworks/bfe/pull/1337))
+- Add session-level API-Key affinity within the same cluster ([Pull #1337](https://github.com/bfenetworks/bfe/pull/1337))
+- Add `req_body_larger_than` and `req_body_less_than` condition primitives ([Pull #1336](https://github.com/bfenetworks/bfe/pull/1336))
+- Add `GetInt64Batch` to redis_client for batch quota remaining reads ([Pull #1337](https://github.com/bfenetworks/bfe/pull/1337))
+- Use control-plane generated redis_key for AI rate limit counters ([Pull #1331](https://github.com/bfenetworks/bfe/pull/1331))
+- Support full Redis key cleanup exported by rate-limit export ([Pull #1333](https://github.com/bfenetworks/bfe/pull/1333))
+- Add BFE AI gateway error codes documentation ([Pull #1339](https://github.com/bfenetworks/bfe/pull/1339))
+
+### Changed
+- Change session-level API-Key affinity TTL to idle timeout with default 600s ([Pull #1337](https://github.com/bfenetworks/bfe/pull/1337))
+- Simplify token_rule.data fields and add TagLevel in mod_ai_token_auth ([Pull #1329](https://github.com/bfenetworks/bfe/pull/1329))
+
+### Fixed
+- Fix model modification when retry between clusters in ServeHTTPForAI ([Pull #1334](https://github.com/bfenetworks/bfe/pull/1334))
+- Fix PriceMap/TierPriceMap JSON serialization to preserve 8-decimal precision ([Pull #1338](https://github.com/bfenetworks/bfe/pull/1338))
+
+
 ## [v1.8.5] - 2026-08-21
 
 ### Added
@@ -465,6 +490,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flexible plugin framework to extend functionality. Based on the framework, developer can add new features rapidly
 - Detailed built-in metrics available for service status monitor
 
+[v1.8.6]: https://github.com/bfenetworks/bfe/compare/v1.8.5...v1.8.6
 [v1.8.5]: https://github.com/bfenetworks/bfe/compare/v1.8.4...v1.8.5
 [v1.8.4]: https://github.com/bfenetworks/bfe/compare/v1.8.3...v1.8.4
 [v1.6.0]: https://github.com/bfenetworks/bfe/compare/v1.5.0...v1.6.0
